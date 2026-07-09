@@ -364,7 +364,7 @@ static errcode_t paibing_sle_adv_rf_start(void)
 }
 
 /*
- * 每 100ms 必须 restart 换帧（热更新不生效）。保留 ADV+ScanRsp 双份与 5ms 间隔。
+ * 每 100ms 必须 restart 换帧（热更新不生效）。ADV+ScanRsp 双份，间隔 0x50(10ms)。
  */
 static errcode_t paibing_sle_adv_rf_publish(void)
 {
