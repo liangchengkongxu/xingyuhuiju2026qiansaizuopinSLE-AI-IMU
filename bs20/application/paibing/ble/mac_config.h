@@ -1,0 +1,38 @@
+/**
+ * Copyright (c) HiSilicon (Shanghai) Technologies Co., Ltd. 2026.
+ *
+ * @brief  paibing 蓝牙传感器广播版配置（编译 target: standard-bs20-n1200-ble）。
+ */
+
+#ifndef PAIBING_BLE_MAC_CONFIG_H
+#define PAIBING_BLE_MAC_CONFIG_H
+
+#define PAIBING_MAC_LEN 6
+
+#define PAIBING_USE_FIXED_LOCAL_MAC 1
+
+#define PAIBING_LOCAL_MAC_B0 0xCC
+#define PAIBING_LOCAL_MAC_B1 0xAD
+#define PAIBING_LOCAL_MAC_B2 0xC9
+#define PAIBING_LOCAL_MAC_B3 0x00
+#define PAIBING_LOCAL_MAC_B4 0x22
+#define PAIBING_LOCAL_MAC_B5 0x01
+
+#define PAIBING_PEER_WHITELIST_ENABLE 0
+
+#define PAIBING_ALLOWED_PEER_MAC_B0 0xEE
+#define PAIBING_ALLOWED_PEER_MAC_B1 0xEF
+#define PAIBING_ALLOWED_PEER_MAC_B2 0x33
+#define PAIBING_ALLOWED_PEER_MAC_B3 0x9B
+#define PAIBING_ALLOWED_PEER_MAC_B4 0x8D
+#define PAIBING_ALLOWED_PEER_MAC_B5 0x5C
+
+/* 蓝牙版：BLE 连接后 GATT Notify 发送 ASCII 九轴行（与原先一致） */
+#define PAIBING_BLE_SENSOR_BROADCAST 0
+#define PAIBING_SLE_SENSOR_BROADCAST 0
+
+#define PAIBING_MULTI_MODE_ENABLE 0
+#define PAIBING_MULTI_SCAN_ENABLE 0
+#define PAIBING_DEVICE_ID 0x01
+
+#endif
