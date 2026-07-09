@@ -5,7 +5,6 @@
  */
 
 #include <string.h>
-#include <stdio.h>
 #include "securec.h"
 #include "common_def.h"
 #include "soc_osal.h"
@@ -21,20 +20,23 @@
 #define SLE_ADV_DATA_LEN_MAX               251
 /* 协议栈参数上限 20dBm；实际输出取决于 sle_customize_max_pwr()，BS20 约 6~8dBm */
 #define SLE_ADV_TX_POWER                   8
-#define PAIBING_SLE_ANNOUNCE_TX_POWER_DBM  8
+#define PAIBING_SLE_ANNOUNCE_TX_POWER_DBM  20
 
 #define SLE_CONN_INTV_MIN_DEFAULT          0x64
 #define SLE_CONN_INTV_MAX_DEFAULT          0x64
-/* 125us 单位：0x28=5ms，提高空口发包密度 */
-#define SLE_ADV_INTERVAL_MIN_DEFAULT       0x28
-#define SLE_ADV_INTERVAL_MAX_DEFAULT       0x28
+/* 125us 单位：0x50=10ms，协议栈允许的最小合法间隔 */
+#define SLE_ADV_INTERVAL_MIN_DEFAULT       0x50
+#define SLE_ADV_INTERVAL_MAX_DEFAULT       0x50
 #define SLE_CONN_SUPERVISION_TIMEOUT_DEFAULT 0x1F4
 #define SLE_CONN_MAX_LATENCY               0x1F3
 
 #define PAIBING_SLE_LOG "[paibing sle adv]"
 
 #if PAIBING_SLE_SENSOR_BROADCAST
-#define PAIBING_ADV_ASCII_MAX              96
+#define PAIBING_MFG_ID_LO                  0xEB
+#define PAIBING_MFG_ID_HI                  0x1A
+#define PAIBING_MFG_PROTO_SENSOR           0x02
+#define PAIBING_MFG_SENSOR_PAYLOAD_LEN     22
 #endif
 
 #if PAIBING_USE_FIXED_LOCAL_MAC
@@ -66,7 +68,7 @@ static bool g_adv_active;
 static bool g_adv_started;
 static bool g_adv_stopping;
 static bool g_adv_restart_pending;
-static uint8_t g_last_payload[PAIBING_ADV_ASCII_MAX];
+static uint8_t g_last_payload[PAIBING_MFG_SENSOR_PAYLOAD_LEN];
 static uint8_t g_last_payload_len;
 static bool g_have_last_mfg;
 static uint8_t g_adv_log_div;
@@ -84,22 +86,36 @@ static uint16_t sle_set_adv_local_name(uint8_t *adv_data, uint16_t max_len)
 }
 
 #if PAIBING_SLE_SENSOR_BROADCAST
-/* ASCII 行与 BLE Notify 完全一致，主控按文本解析 */
-static int paibing_build_ascii_line(uint8_t *payload, uint8_t max_len, uint32_t uptime_ms,
+static void paibing_put_u16_le(uint8_t *dst, uint16_t v)
+{
+    dst[0] = (uint8_t)(v & 0xFF);
+    dst[1] = (uint8_t)((v >> 8) & 0xFF);
+}
+
+static void paibing_put_i16_le(uint8_t *dst, int16_t v)
+{
+    paibing_put_u16_le(dst, (uint16_t)v);
+}
+
+/* 22B 二进制：空口约为 ASCII 一半，7m+ 更稳；主控按 EB 1A 02 解析 */
+static uint8_t paibing_build_mfg_sensor(uint8_t *payload, uint32_t uptime_ms,
     int32_t ax_mg, int32_t ay_mg, int32_t az_mg, int32_t gx_mdps, int32_t gy_mdps,
     float roll_deg, float pitch_deg, float magnitude)
 {
-    int len = snprintf((char *)payload, max_len,
-        "@%lu,A%+ld,%+ld,%+ld,G%+ld,%+ld,R%+d,P%+d,M%lu\n",
-        (unsigned long)uptime_ms,
-        (long)(ax_mg / 10), (long)(ay_mg / 10), (long)(az_mg / 10),
-        (long)(gx_mdps / 1000), (long)(gy_mdps / 1000),
-        (int)(roll_deg * 10), (int)(pitch_deg * 10), (unsigned long)(magnitude * 100));
-
-    if (len <= 0 || len >= (int)max_len) {
-        return 0;
-    }
-    return len;
+    payload[0] = PAIBING_MFG_ID_LO;
+    payload[1] = PAIBING_MFG_ID_HI;
+    payload[2] = PAIBING_MFG_PROTO_SENSOR;
+    payload[3] = PAIBING_DEVICE_ID;
+    paibing_put_u16_le(&payload[4], (uint16_t)(uptime_ms & 0xFFFF));
+    paibing_put_i16_le(&payload[6], (int16_t)(ax_mg / 10));
+    paibing_put_i16_le(&payload[8], (int16_t)(ay_mg / 10));
+    paibing_put_i16_le(&payload[10], (int16_t)(az_mg / 10));
+    paibing_put_i16_le(&payload[12], (int16_t)(gx_mdps / 1000));
+    paibing_put_i16_le(&payload[14], (int16_t)(gy_mdps / 1000));
+    paibing_put_i16_le(&payload[16], (int16_t)(roll_deg * 10.0f));
+    paibing_put_i16_le(&payload[18], (int16_t)(pitch_deg * 10.0f));
+    paibing_put_u16_le(&payload[20], (uint16_t)(magnitude * 100.0f));
+    return PAIBING_MFG_SENSOR_PAYLOAD_LEN;
 }
 
 static uint16_t sle_append_mfg_sensor(uint8_t *adv_data, uint16_t max_len, const uint8_t *payload, uint8_t plen)
@@ -170,7 +186,7 @@ static uint16_t sle_set_scan_response_data(uint8_t *scan_rsp_data, const uint8_t
     idx += (uint16_t)len;
     idx += sle_set_adv_local_name(&scan_rsp_data[idx], SLE_ADV_DATA_LEN_MAX - idx);
 #if PAIBING_SLE_SENSOR_BROADCAST
-    /* Scan Response 也带同一份 ASCII，主控多一路接收机会 */
+    /* Scan Response 也带 22B，ADV 收不到时多一路 */
     if (mfg_payload != NULL && mfg_len > 0) {
         idx += sle_append_mfg_sensor(&scan_rsp_data[idx], (uint16_t)(SLE_ADV_DATA_LEN_MAX - idx), mfg_payload, mfg_len);
     }
@@ -362,7 +378,7 @@ static errcode_t paibing_sle_adv_rf_publish(void)
 
     if (!g_adv_started) {
         g_adv_restart_pending = false;
-        osal_printk("%s ASCII adv 10Hz async-restart\r\n", PAIBING_SLE_LOG);
+        osal_printk("%s binary adv 10Hz async-restart\r\n", PAIBING_SLE_LOG);
         return paibing_sle_adv_rf_start();
     }
 
@@ -515,17 +531,14 @@ errcode_t paibing_sle_adv_restart(void)
 errcode_t paibing_sle_adv_push_sensor(uint32_t uptime_ms, int32_t ax_mg, int32_t ay_mg, int32_t az_mg,
     int32_t gx_mdps, int32_t gy_mdps, float roll_deg, float pitch_deg, float magnitude)
 {
-    uint8_t payload[PAIBING_ADV_ASCII_MAX];
-    int plen;
+    uint8_t payload[PAIBING_MFG_SENSOR_PAYLOAD_LEN];
+    uint8_t plen;
     errcode_t ret;
 
-    plen = paibing_build_ascii_line(payload, sizeof(payload), uptime_ms, ax_mg, ay_mg, az_mg,
+    plen = paibing_build_mfg_sensor(payload, uptime_ms, ax_mg, ay_mg, az_mg,
         gx_mdps, gy_mdps, roll_deg, pitch_deg, magnitude);
-    if (plen == 0) {
-        return ERRCODE_SLE_FAIL;
-    }
 
-    ret = paibing_sle_stage_announce_buffers(payload, (uint8_t)plen);
+    ret = paibing_sle_stage_announce_buffers(payload, plen);
     if (ret != ERRCODE_SLE_SUCCESS) {
         osal_printk("%s stage adv fail\r\n", PAIBING_SLE_LOG);
         return ret;
@@ -538,7 +551,8 @@ errcode_t paibing_sle_adv_push_sensor(uint32_t uptime_ms, int32_t ax_mg, int32_t
 
     if (++g_adv_log_div >= 100) {
         g_adv_log_div = 0;
-        osal_printk("%s adv: %.*s", PAIBING_SLE_LOG, plen, (const char *)payload);
+        osal_printk("%s mfg EB1A ms:%lu ax:%d\r\n", PAIBING_SLE_LOG,
+            (unsigned long)uptime_ms, (int)(ax_mg / 10));
     }
     return ERRCODE_SLE_SUCCESS;
 }
