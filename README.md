@@ -1,0 +1,2 @@
+# xingyuhuiju2026qiansaizuopinSLE-AI-IMU
+这是2026嵌赛海思赛题SS928端侧智能，一套基于SLE+端侧智能的智能羽毛球训练系统
