@@ -1,12 +1,20 @@
 # 文档索引
 
-本目录存放**跨 BS20 / SS928** 的项目级文档。模块专属文档见各子目录 `docs/`。
+本目录存放**跨 BS20 / SS928** 的项目级文档。
 
 | 文档 | 说明 |
 |------|------|
-| [仓库目录说明.md](仓库目录说明.md) | 全仓文件夹职责与阅读顺序 |
-| [联调快速指南.md](联调快速指南.md) | 拍柄 + 主控端到端联调步骤与排障 |
-| [开发过程与代码要点.md](开发过程与代码要点.md) | 开发历程、架构演进、踩坑记录 |
+| [开发过程与代码要点.md](开发过程与代码要点.md) | ★ 全栈开发历程、踩坑、代码地图（答辩用） |
+| [仓库目录说明.md](仓库目录说明.md) | 全仓文件夹职责 |
+| [联调快速指南.md](联调快速指南.md) | 端到端联调与排障 |
+
+## Cursor Agent Skill
+
+| Skill | 路径 |
+|-------|------|
+| 全栈入口 | [../.cursor/skills/paibing-project/SKILL.md](../.cursor/skills/paibing-project/SKILL.md) |
+| 拍柄固件 | [../.cursor/skills/paibing-bs20/SKILL.md](../.cursor/skills/paibing-bs20/SKILL.md) |
+| 主控 IMU/UI | [../.cursor/skills/paibing-ss928/SKILL.md](../.cursor/skills/paibing-ss928/SKILL.md) |
 
 ## 按角色跳转
 
