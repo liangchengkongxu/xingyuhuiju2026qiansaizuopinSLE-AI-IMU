@@ -25,6 +25,13 @@
 
 ## 快速导航
 
+| 文档 | 说明 |
+|------|------|
+| [`docs/开发过程与代码要点.md`](docs/开发过程与代码要点.md) | 开发历程、架构演进、踩坑与修复 |
+| [`bs20/docs/主控对接说明.md`](bs20/docs/主控对接说明.md) | SS928 解析 22 字节协议 |
+| [`bs20/docs/代码文件索引.md`](bs20/docs/代码文件索引.md) | 源码文件速查 |
+| [`.cursor/skills/paibing-bs20/SKILL.md`](.cursor/skills/paibing-bs20/SKILL.md) | Cursor Agent 开发 Skill |
+
 ### BS20 拍柄固件
 
 ```bash
@@ -44,10 +51,14 @@ cd bs20
 ```
 .
 ├── README.md           # 本文件（项目总览）
+├── docs/               # 项目级文档
+│   └── 开发过程与代码要点.md
+├── .cursor/skills/     # Cursor Agent Skill
+│   └── paibing-bs20/
 ├── bs20/               # BS20-N1200 拍柄固件
 │   ├── application/    # paibing 应用源码
 │   ├── tools/          # 构建脚本
-│   ├── docs/           # 主控对接协议
+│   ├── docs/           # 协议与代码索引
 │   └── integration/    # SDK 集成 overlay
 └── ss928/              # SS928 端侧智能（待补充）
 ```
@@ -56,7 +67,7 @@ cd bs20
 
 ## 数据协议（星闪广播）
 
-22 字节小端二进制，头 `EB 1A 02`，详见 [`bs20/docs/主控对接说明.md`](bs20/docs/主控对接说明.md)。
+22 字节小端二进制，头 `EB 1A 02`，ADV 与 Scan Response 均携带。详见 [`bs20/docs/主控对接说明.md`](bs20/docs/主控对接说明.md)。
 
 ---
 
