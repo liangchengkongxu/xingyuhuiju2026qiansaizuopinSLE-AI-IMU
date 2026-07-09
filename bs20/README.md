@@ -6,7 +6,7 @@
 
 | 版本 | 编译 Target | 通信方式 |
 |------|-------------|----------|
-| 星闪 | `standard-bs20-n1200` | 非连接扫播，22 字节 `EB 1A 02` |
+| 星闪 | `standard-bs20-n1200` | 非连接扫播，**ASCII 行** @ 100ms |
 | 蓝牙 | `standard-bs20-n1200-ble` | 连接 + GATT Notify ASCII 行 |
 
 ## 目录

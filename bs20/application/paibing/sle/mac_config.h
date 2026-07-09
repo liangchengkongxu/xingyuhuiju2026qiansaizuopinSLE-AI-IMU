@@ -17,7 +17,7 @@
 #define PAIBING_LOCAL_MAC_B2 0xC9
 #define PAIBING_LOCAL_MAC_B3 0x00
 #define PAIBING_LOCAL_MAC_B4 0x22
-#define PAIBING_LOCAL_MAC_B5 0x06
+#define PAIBING_LOCAL_MAC_B5 0x01
 
 /* 0：任意对端可连；1：仅允许下方对端 MAC */
 #define PAIBING_PEER_WHITELIST_ENABLE 0
@@ -30,8 +30,7 @@
 #define PAIBING_ALLOWED_PEER_MAC_B5 0x5C
 
 /*
- * 1：非连接扫播，IMU 在 ADV + Scan Response 的 Manufacturer 0xFF 中周期更新
- *    22 字节二进制 EB 1A 02（空口更短，远距离丢包更低）
+ * 1：非连接扫播，IMU 在 ADV 的 Manufacturer 0xFF 中发 ASCII 行（与 BLE Notify 相同）
  * 0：连接后 Notify ASCII 行
  */
 #define PAIBING_SLE_SENSOR_BROADCAST 1

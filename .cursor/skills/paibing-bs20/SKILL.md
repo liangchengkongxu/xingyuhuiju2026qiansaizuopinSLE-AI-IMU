@@ -30,11 +30,14 @@ docs/开发过程与代码要点.md    # 开发历程与决策记录
 
 ## 星闪当前策略（勿随意改回）
 
-1. **22 字节二进制** `EB 1A 02`（非 ASCII）
-2. **ADV + Scan Response 双份** 0xFF 厂商数据
-3. **持续广播 + 热更新** `sle_set_announce_data`，禁止每 100ms 同步 stop/start
-4. `sle_customize_max_pwr(8,2)` + `announce_tx_power=8`
-5. 广播间隔 `0x40`（8ms）
+1. **ASCII 行**（与 BLE Notify 相同），放在 **0xFF 厂商域**
+2. **ADV + Scan Response 双份** 相同 ASCII
+3. **100ms 异步 restart**（热更新无效，不可省）
+4. 广播间隔 **0x28**（5ms）
+5. `sle_customize_max_pwr(8,2)` + `announce_tx_power=8`
+6. **禁止** 180ms 限流 restart（会导致数据刷新过慢）
+
+主控必须：**ASCII 解析 + @uptime 去重**。见 `bs20/docs/主控对接说明.md`。
 
 关键文件：`bs20/application/paibing/sle/paibing_sle_server_adv.c`
 
@@ -65,9 +68,10 @@ bash tools/build_paibing_ble.sh
 
 | 现象 | 检查 |
 |------|------|
-| 有名无数据 | 主控是否解析 ADV/ScanRsp 的 0xFF，而非只看设备名 |
-| 包头对体全 0 | 是否又在播着时同步 stop/start；用热更新 |
-| 远距丢包 | 载荷是否变长 ASCII；应用二进制 + 热更新 |
+| 有名无数据 | 是否解析 ADV/ScanRsp 的 0xFF ASCII，而非只看设备名 |
+| 数值错乱 | 主控是否误用 EB 1A 二进制解析 |
+| uptime 卡死 | 是否又在播着时仅热更新而不 restart |
+| 日志刷屏 | 主控未按 @uptime 去重（拍柄 5ms 广播正常） |
 | 功率无效 | 是否调用 `sle_customize_max_pwr`；20dBm 只是 API 上限 |
 | RSSI 80 | 通常是 -80 dBm 弱信号 |
 
@@ -81,8 +85,8 @@ bash tools/build_paibing_sle.sh 01   # … 06
 
 ## 主控协议
 
-- 星闪：22B 二进制，见 `bs20/docs/主控对接说明.md`
-- 蓝牙：ASCII `@ms,A...,G...,R...,P...,M...\n`
+- 星闪：**ASCII 行**，ADV+ScanRsp 0xFF，**@uptime 去重**，见 `bs20/docs/主控对接说明.md`
+- 蓝牙：连接后 ASCII Notify，格式相同
 
 ## 修改原则
 
