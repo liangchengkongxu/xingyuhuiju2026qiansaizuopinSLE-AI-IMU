@@ -29,17 +29,14 @@ docs/开发过程与代码要点.md    # 开发历程与决策记录
 
 入口：`sle/paibing_app.c` 或 `ble/paibing_app.c` 的 `app_main()` 覆盖 SDK weak 符号。
 
-## 星闪当前策略（2026-07 远距离版，勿随意改回）
+## 星闪当前策略（2026-07，勿随意改回）
 
-1. **22B 二进制** `EB 1A 02`，放在 **0xFF 厂商域**（非 ASCII）
-2. **ADV + Scan Response 双份** 相同载荷
-3. **100ms 异步 restart**：`stop` → `disable` 回调里 `commit + start`（热更新无效）
-4. 广播间隔 **0x50**（10ms，协议栈最小合法值；勿用 0x28）
-5. `sle_customize_max_pwr(8,2)` + `announce_tx_power=20`（芯片实际约 6～8 dBm）
-6. **禁止** 180ms 限流 restart（会导致数据刷新过慢）
-7. **禁止** 播着时仅 `sle_set_announce_data`（uptime 会卡死在首帧）
-
-主控必须：**22B 二进制解析 + uptime 去重**。见 `bs20/docs/主控对接说明-远距离二进制版.md`。
+1. **ASCII 行**（与 BLE Notify 相同），放在 **0xFF 厂商域**
+2. **ADV + Scan Response 双份** 相同 ASCII
+3. **100ms 同步 restart**：`stop` → 等 disable（≤40ms）→ `commit + start`（热更新无效）
+4. 广播间隔 **0x28**（5ms，提高发包密度；0x50 实测丢包更差）
+5. `sle_customize_max_pwr(8,2)` + `announce_tx_power=8`
+6. **禁止** 单独改二进制而不恢复 0x28（7m 优化失败：发包密度比包长短更关键）
 
 关键文件：`bs20/application/paibing/sle/paibing_sle_server_adv.c`
 
@@ -86,15 +83,15 @@ bash tools/build_paibing_ble.sh
 | 数值错乱（A+980） | 主控是否误用 ASCII sscanf 解析二进制 |
 | uptime 卡死 | 是否又在播着时仅热更新而不 restart |
 | restart fail 0x8000600a | 同步 stop/start 抢状态；用异步 disable 回调 |
-| 5m 尚可 7m 差 | 是否仍用 ASCII；改 22B + 主控扫描占空比 |
-| 功率无效 | 是否调用 `sle_customize_max_pwr`；20dBm 只是 API 上限 |
+| 5m 尚可 7m 差 | 优先恢复 0x28 发包密度；7m 还需主控加大扫描占空比 |
+| 数值错乱（A+980） | 固件/主控 ASCII 与二进制解析不一致 |
 | RSSI 80 | 通常是 -80 dBm 弱信号 |
 
 ## 已试验方案（勿重复踩坑）
 
 | 方案 | 问题 |
 |------|------|
-| ASCII ~50B 扫播 | 空口长，7m+ CRC 失败率高 |
+| 22B 二进制 + 0x50 间隔 | 实测丢包率不如 ASCII+0x28（发包密度更关键） |
 | 热更新 `set_announce_data` | 空口不刷新，uptime 卡首帧 |
 | 同步 stop→sleep→start | disable 跟不上，0x8000600a |
 | 180ms 限流 restart | 破坏 10Hz，同一帧重复过久 |
@@ -121,7 +118,7 @@ git commit -m "message"
 
 ## 主控协议
 
-- 星闪：**22B 二进制**，ADV+ScanRsp 0xFF，**uptime 去重**
+- 星闪：**ASCII 行**，ADV+ScanRsp 0xFF，**@uptime 去重**
 - 蓝牙：连接后 ASCII Notify，格式 `@ms,A...,G...,R...,P...,M...\n`
 
 ## 修改原则

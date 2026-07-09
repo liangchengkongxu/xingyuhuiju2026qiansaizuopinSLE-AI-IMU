@@ -30,7 +30,7 @@
 #define PAIBING_ALLOWED_PEER_MAC_B5 0x5C
 
 /*
- * 1：非连接扫播，ADV+ScanRsp 的 0xFF 发 22B 二进制 EB 1A 02（远距离优于 ASCII）
+ * 1：非连接扫播，ADV+ScanRsp 的 0xFF 发 ASCII 行（与 BLE Notify 相同）
  * 0：连接后 Notify ASCII 行
  */
 #define PAIBING_SLE_SENSOR_BROADCAST 1
