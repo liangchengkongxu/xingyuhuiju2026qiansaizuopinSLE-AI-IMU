@@ -25,9 +25,11 @@
 
 #define SLE_CONN_INTV_MIN_DEFAULT          0x64
 #define SLE_CONN_INTV_MAX_DEFAULT          0x64
-/* 125us 单位：0x28=5ms，提高空口发包密度 */
+/* 125us 单位：0x28=5ms，上一版 5m 约 80% 正确率；0x50 发包密度减半 */
 #define SLE_ADV_INTERVAL_MIN_DEFAULT       0x28
 #define SLE_ADV_INTERVAL_MAX_DEFAULT       0x28
+#define PAIBING_ADV_STOP_WAIT_MS           40
+#define PAIBING_ADV_STOP_POLL_MS           2
 #define SLE_CONN_SUPERVISION_TIMEOUT_DEFAULT 0x1F4
 #define SLE_CONN_MAX_LATENCY               0x1F3
 
@@ -64,8 +66,6 @@ static uint16_t g_announce_len;
 static uint16_t g_seek_rsp_len;
 static bool g_adv_active;
 static bool g_adv_started;
-static bool g_adv_stopping;
-static bool g_adv_restart_pending;
 static uint8_t g_last_payload[PAIBING_ADV_ASCII_MAX];
 static uint8_t g_last_payload_len;
 static bool g_have_last_mfg;
@@ -84,7 +84,7 @@ static uint16_t sle_set_adv_local_name(uint8_t *adv_data, uint16_t max_len)
 }
 
 #if PAIBING_SLE_SENSOR_BROADCAST
-/* ASCII 行与 BLE Notify 完全一致，主控按文本解析 */
+/* ASCII 行与 BLE Notify 一致，主控 sscanf 解析；5ms 间隔提高扫到概率 */
 static int paibing_build_ascii_line(uint8_t *payload, uint8_t max_len, uint32_t uptime_ms,
     int32_t ax_mg, int32_t ay_mg, int32_t az_mg, int32_t gx_mdps, int32_t gy_mdps,
     float roll_deg, float pitch_deg, float magnitude)
@@ -170,7 +170,7 @@ static uint16_t sle_set_scan_response_data(uint8_t *scan_rsp_data, const uint8_t
     idx += (uint16_t)len;
     idx += sle_set_adv_local_name(&scan_rsp_data[idx], SLE_ADV_DATA_LEN_MAX - idx);
 #if PAIBING_SLE_SENSOR_BROADCAST
-    /* Scan Response 也带同一份 ASCII，主控多一路接收机会 */
+    /* Scan Response 也带同一份 ASCII，远距离多一路接收机会 */
     if (mfg_payload != NULL && mfg_len > 0) {
         idx += sle_append_mfg_sensor(&scan_rsp_data[idx], (uint16_t)(SLE_ADV_DATA_LEN_MAX - idx), mfg_payload, mfg_len);
     }
@@ -348,41 +348,40 @@ static errcode_t paibing_sle_adv_rf_start(void)
 }
 
 /*
- * 每 100ms 必须 restart 换帧（热更新不生效）。保留 ADV+ScanRsp 双份与 5ms 间隔。
+ * 每 100ms 同步 stop→等 disable→commit+start（热更新不生效）。
+ * 比纯异步 restart 缩短停播空窗；间隔 0x28 保持高发包密度。
  */
 static errcode_t paibing_sle_adv_rf_publish(void)
 {
     errcode_t ret;
+    uint32_t waited = 0;
 
     if (!g_have_last_mfg || g_announce_len == 0) {
         return ERRCODE_SLE_FAIL;
     }
 
-    g_adv_restart_pending = true;
-
     if (!g_adv_started) {
-        g_adv_restart_pending = false;
-        osal_printk("%s ASCII adv 10Hz async-restart\r\n", PAIBING_SLE_LOG);
+        osal_printk("%s ASCII adv 10Hz sync-restart\r\n", PAIBING_SLE_LOG);
         return paibing_sle_adv_rf_start();
     }
 
-    if (g_adv_stopping) {
-        return ERRCODE_SLE_SUCCESS;
+    if (g_adv_active) {
+        ret = sle_stop_announce(SLE_ADV_HANDLE_DEFAULT);
+        if (ret != ERRCODE_SLE_SUCCESS) {
+            osal_printk("%s stop announce fail:0x%x\r\n", PAIBING_SLE_LOG, ret);
+            return ret;
+        }
+        while (g_adv_active && waited < PAIBING_ADV_STOP_WAIT_MS) {
+            osal_msleep(PAIBING_ADV_STOP_POLL_MS);
+            waited += PAIBING_ADV_STOP_POLL_MS;
+        }
+        if (g_adv_active) {
+            osal_printk("%s stop timeout, force refresh\r\n", PAIBING_SLE_LOG);
+            g_adv_active = false;
+        }
     }
 
-    if (!g_adv_active) {
-        g_adv_restart_pending = false;
-        return paibing_sle_adv_rf_start();
-    }
-
-    g_adv_stopping = true;
-    ret = sle_stop_announce(SLE_ADV_HANDLE_DEFAULT);
-    if (ret != ERRCODE_SLE_SUCCESS) {
-        g_adv_stopping = false;
-        osal_printk("%s stop announce fail:0x%x\r\n", PAIBING_SLE_LOG, ret);
-        return ret;
-    }
-    return ERRCODE_SLE_SUCCESS;
+    return paibing_sle_adv_rf_start();
 }
 #endif
 
@@ -419,29 +418,10 @@ static void sle_announce_enable_cbk(uint32_t announce_id, errcode_t status)
 
 static void sle_announce_disable_cbk(uint32_t announce_id, errcode_t status)
 {
-    errcode_t ret;
-
     unused(announce_id);
     unused(status);
 #if PAIBING_SLE_SENSOR_BROADCAST
     g_adv_active = false;
-    g_adv_stopping = false;
-
-    if (g_adv_restart_pending && g_have_last_mfg) {
-        g_adv_restart_pending = false;
-        ret = paibing_sle_commit_announce_data();
-        if (ret != ERRCODE_SLE_SUCCESS) {
-            osal_printk("%s disable cb commit fail:0x%x\r\n", PAIBING_SLE_LOG, ret);
-            return;
-        }
-        ret = sle_start_announce(SLE_ADV_HANDLE_DEFAULT);
-        if (ret != ERRCODE_SLE_SUCCESS) {
-            osal_printk("%s disable cb start fail:0x%x\r\n", PAIBING_SLE_LOG, ret);
-            return;
-        }
-        g_adv_active = true;
-        g_adv_started = true;
-    }
 #endif
 }
 

@@ -1,7 +1,7 @@
 /**
  * Copyright (c) HiSilicon (Shanghai) Technologies Co., Ltd. 2026.
  *
- * @brief  拍柄星闪版入口：非连接广播，ASCII 行格式与蓝牙相同。
+ * @brief  拍柄星闪版入口：非连接广播，22B 二进制 EB 1A 02。
  */
 
 #include <stddef.h>
