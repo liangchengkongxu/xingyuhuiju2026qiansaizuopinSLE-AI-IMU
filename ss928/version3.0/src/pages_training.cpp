@@ -1271,7 +1271,11 @@ void ActionDetailPage::tryStartReplay()
     }
     if (m_videoStack && m_replayPlaceholder) {
         m_videoStack->setCurrentWidget(m_replayPlaceholder);
-        m_replayPlaceholder->setText(QStringLiteral("正在生成击球回放…"));
+        if (replayHitNeedsPoseRender(m_pendingReplaySession, m_pendingHitIdx)) {
+            m_replayPlaceholder->setText(QStringLiteral("正在生成击球回放（骨骼渲染中）…"));
+        } else {
+            m_replayPlaceholder->setText(QStringLiteral("正在生成击球回放…"));
+        }
     }
     if (m_replayWaitTimer == nullptr) {
         m_replayWaitTimer = new QTimer(this);
@@ -1628,6 +1632,9 @@ void ActionDetailPage::showAction(int idx, int score, const QString &skillLabel,
             highlightSpeedButton(b, 1.0);
             break;
         }
+    }
+    if (replayHitNeedsPoseRender(replaySessionId, idx)) {
+        requestHitReplayPoseRender(replaySessionId, idx);
     }
     tryStartReplay();
 }

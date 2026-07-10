@@ -53,7 +53,8 @@
 4. **systemd unit**：用 `install_autostart.sh`（ssh  heredoc），scp 曾出现全 null 字节。  
 5. **改 run.sh 环境变量** 后需 `systemctl restart widget_ui.service` 或 reboot。  
 6. **单人练习击球类型**在 TrainingPage 固定为当前动作，不跟 CNN/YOLO 分类走。  
-7. **回放勿从 VPSS ch0 取帧**（`WIDGET_REPLAY_VPSS_CHN` 保持 `-1`），否则骨骼 RGN 与 VO 预览会被饿死。
+7. **回放专用 VPSS ch3**（`WIDGET_REPLAY_VPSS_CHN=3`），**勿用 ch0**（会抢预览导致崩溃）。  
+8. **实时骨骼默认关**（`WIDGET_POSE_RGN=0`），回放软件 stamp；第 4 条起按需渲染（`WIDGET_REPLAY_POSE_EAGER_MAX=3`）。
 
 ---
 

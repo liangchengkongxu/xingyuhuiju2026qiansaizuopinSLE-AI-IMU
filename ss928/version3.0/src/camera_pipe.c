@@ -260,6 +260,15 @@ static td_bool camera_pose_ch1_only(td_void)
     return TD_FALSE;
 }
 
+static td_bool camera_replay_channel_wanted(td_void)
+{
+    const char *dis = getenv("WIDGET_REPLAY_DISABLE");
+    if (dis != NULL && dis[0] != '\0' && dis[0] != '0') {
+        return TD_FALSE;
+    }
+    return TD_TRUE;
+}
+
 static td_void camera_fill_vpss_chn_enable(td_bool *chn_enable, td_u32 arr_size)
 {
     td_u32 i;
@@ -275,6 +284,9 @@ static td_void camera_fill_vpss_chn_enable(td_bool *chn_enable, td_u32 arr_size)
         } else {
             LOG("VPSS ch2 disabled (WIDGET_POSE_CH1_ONLY=1, pose uses ch1)");
         }
+    }
+    if (camera_replay_channel_wanted() == TD_TRUE) {
+        chn_enable[CAMERA_PIPE_REPLAY_VPSS_CHN] = TD_TRUE;
     }
 }
 
@@ -300,6 +312,9 @@ td_s32 camera_pipe_mpp_prepare(td_void)
         if (camera_ai_channel_wanted()) {
             yuv_cnt += 12U;
         }
+        if (camera_replay_channel_wanted() == TD_TRUE) {
+            yuv_cnt += 4U;
+        }
         LOG("MPP: socket0 VI_ONLINE_VPSS_OFFLINE, VB yuv=%u raw=%u", yuv_cnt, raw_cnt);
     } else if (g_mipi_socket == 1U) {
         /* 固件单路 sensor1 与 sensor0 同为 vi_pipe:0，常用 Online 模式（与 0 0 同类 VB） */
@@ -308,6 +323,9 @@ td_s32 camera_pipe_mpp_prepare(td_void)
         raw_cnt = VB_RAW_SOCKET0;
         if (camera_ai_channel_wanted()) {
             yuv_cnt += 12U;
+        }
+        if (camera_replay_channel_wanted() == TD_TRUE) {
+            yuv_cnt += 4U;
         }
         LOG("MPP: socket1 VI_ONLINE_VPSS_OFFLINE, VB yuv=%u raw=%u (firmware sensor1)", yuv_cnt, raw_cnt);
     } else {
@@ -359,6 +377,11 @@ td_u32 camera_pipe_ai_vpss_chn(td_void)
 td_u32 camera_pipe_det_vpss_chn(td_void)
 {
     return (td_u32)CAMERA_PIPE_DET_VPSS_CHN;
+}
+
+td_u32 camera_pipe_replay_vpss_chn(td_void)
+{
+    return (td_u32)CAMERA_PIPE_REPLAY_VPSS_CHN;
 }
 
 td_bool camera_pipe_ai_channel_active(td_void)
@@ -440,6 +463,19 @@ static td_s32 camera_start_vpss(ot_size *in_size)
         chn_attr[CAMERA_PIPE_DET_VPSS_CHN].pixel_format  = OT_PIXEL_FORMAT_YVU_SEMIPLANAR_420;
         LOG("VPSS DET chn%d: %ux%u NV12 depth=%d", CAMERA_PIPE_DET_VPSS_CHN,
             CAMERA_PIPE_DET_WIDTH, CAMERA_PIPE_DET_HEIGHT, chn_attr[CAMERA_PIPE_DET_VPSS_CHN].depth);
+    }
+
+    if (chn_enable[CAMERA_PIPE_REPLAY_VPSS_CHN] == TD_TRUE) {
+        sample_comm_vpss_get_default_chn_attr(&chn_attr[CAMERA_PIPE_REPLAY_VPSS_CHN]);
+        chn_attr[CAMERA_PIPE_REPLAY_VPSS_CHN].width         = CAMERA_PIPE_REPLAY_WIDTH;
+        chn_attr[CAMERA_PIPE_REPLAY_VPSS_CHN].height        = CAMERA_PIPE_REPLAY_HEIGHT;
+        chn_attr[CAMERA_PIPE_REPLAY_VPSS_CHN].compress_mode = OT_COMPRESS_MODE_NONE;
+        chn_attr[CAMERA_PIPE_REPLAY_VPSS_CHN].depth         = 2;
+        chn_attr[CAMERA_PIPE_REPLAY_VPSS_CHN].pixel_format  = OT_PIXEL_FORMAT_YVU_SEMIPLANAR_420;
+        chn_attr[CAMERA_PIPE_REPLAY_VPSS_CHN].aspect_ratio.mode = OT_ASPECT_RATIO_NONE;
+        LOG("VPSS REPLAY chn%d: %ux%u NV21 depth=%d (hit replay only)",
+            CAMERA_PIPE_REPLAY_VPSS_CHN, CAMERA_PIPE_REPLAY_WIDTH, CAMERA_PIPE_REPLAY_HEIGHT,
+            chn_attr[CAMERA_PIPE_REPLAY_VPSS_CHN].depth);
     }
 
     ret = sample_common_vpss_start(g_vpss_grp, chn_enable, &grp_attr, chn_attr, OT_VPSS_MAX_PHYS_CHN_NUM);

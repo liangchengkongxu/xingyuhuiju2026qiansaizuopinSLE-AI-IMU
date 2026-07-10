@@ -52,10 +52,15 @@ td_void camera_pipe_shutdown(td_void);
 #define CAMERA_PIPE_DET_VPSS_CHN 2
 #define CAMERA_PIPE_DET_WIDTH    640
 #define CAMERA_PIPE_DET_HEIGHT   640
+/* 击球回放专用：16:9，不 bind VO，sample_vio_ai 按 WIDGET_REPLAY_FPS 取帧 */
+#define CAMERA_PIPE_REPLAY_VPSS_CHN 3
+#define CAMERA_PIPE_REPLAY_WIDTH    960
+#define CAMERA_PIPE_REPLAY_HEIGHT   540
 
 td_u32 camera_pipe_vpss_grp(td_void);
 td_u32 camera_pipe_ai_vpss_chn(td_void);
 td_u32 camera_pipe_det_vpss_chn(td_void);
+td_u32 camera_pipe_replay_vpss_chn(td_void);
 td_bool camera_pipe_ai_channel_active(td_void);
 td_bool camera_pipe_preview_active(td_void);
 td_s32 camera_pipe_wait_ai_chn_ready(td_u32 max_sec);

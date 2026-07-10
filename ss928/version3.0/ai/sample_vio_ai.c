@@ -343,6 +343,7 @@ static ot_vpss_chn g_det_vpss_chn = 2;
 static aclmdlDesc *g_pose_model_desc = TD_NULL;
 static uint32_t g_pose_model_id = 0;
 static int g_pose_enabled = 0;
+static int g_pose_rgn_enable = 0;
 static ot_vpss_chn g_pose_vpss_chn = 2;
 static td_u32 g_pose_line_thick = 7;
 static int g_pose_line_auto = 1;
@@ -365,7 +366,7 @@ static struct timeval g_pose_valid_tv;
 static td_bool g_pose_valid_ts_set = TD_FALSE;
 static int g_pose_ch1_only = 1;
 static int g_replay_live_ring = 0;
-static td_s32 g_replay_src_chn = 0;
+static td_s32 g_replay_src_chn = -1;
 static td_bool g_pose_rgn_inited = TD_FALSE;
 static td_bool g_pose_edge_was_show[POSE_SKELETON_EDGES];
 static td_bool g_pose_kpt_show[POSE_NUM_KEYPOINTS];
@@ -679,7 +680,7 @@ static td_void yolo_swing_fire(int cls, float sc, td_u64 ts_ms, const char *reas
     g_swing.last_swing_cls = cls;
     g_swing.last_swing_score = sc;
     g_swing.last_swing_ms = ts_ms;
-    if (g_pose_enabled != 0 && g_pose_clear_on_swing != 0) {
+    if (g_pose_enabled != 0 && g_pose_clear_on_swing != 0 && g_pose_rgn_enable != 0) {
         pose_rgn_clear_now();
     }
     printf("yolo cam-swing #%d cls=%d(%s) score=%.3f peak_vel=%.3f reason=%s\n",
@@ -955,7 +956,7 @@ static void yolo_export_action_state(const yolo_det_t *motion_src, int motion_cn
             stable = 1;
             cls = maj_cls;
             score = maj_score;
-            if (g_pose_enabled != 0 && g_pose_clear_on_action != 0 && cls != s_pose_action_cls) {
+            if (g_pose_enabled != 0 && g_pose_clear_on_action != 0 && g_pose_rgn_enable != 0 && cls != s_pose_action_cls) {
                 if (s_pose_action_cls >= 0) {
                     pose_rgn_clear_now();
                 }
@@ -1290,6 +1291,7 @@ static void yolo_tune_init_once(void)
         g_pose_smooth_alpha = 0.90f;
     }
     g_pose_ch1_only = yolo_env_get_int_default("WIDGET_POSE_CH1_ONLY", 1);
+    g_pose_rgn_enable = yolo_env_get_int_default("WIDGET_POSE_RGN", 0);
     g_replay_live_ring = yolo_env_get_int_default("WIDGET_REPLAY_LIVE", 0);
     g_yolo_draw_nv12 = yolo_env_get_int_default("WIDGET_YOLO_DRAW_NV12", 0);
     g_yolo_export_action = yolo_env_get_int_default("WIDGET_YOLO_ACTION", 1);
@@ -2140,6 +2142,9 @@ static td_void pose_rgn_lazy_init(td_void)
 {
     td_s32 ret;
 
+    if (g_pose_rgn_enable == 0) {
+        return;
+    }
     if (g_pose_rgn_inited == TD_TRUE) {
         return;
     }
@@ -2198,6 +2203,9 @@ static td_void pose_rgn_update_skeleton(const pose_result_t *pose, td_u32 img_w,
     td_u32 bracket_len;
     float kpt_vis = yolo_env_get_float_default("WIDGET_POSE_KPT_VIS", 0.25f);
 
+    if (g_pose_rgn_enable == 0) {
+        return;
+    }
     if (g_pose_rgn_inited != TD_TRUE) {
         return;
     }
@@ -2310,7 +2318,7 @@ static td_void pose_rgn_update_skeleton(const pose_result_t *pose, td_u32 img_w,
 
 static td_void pose_rgn_redraw_cached(td_void)
 {
-    if (g_pose_enabled == 0 || g_pose_result.valid == 0) {
+    if (g_pose_rgn_enable == 0 || g_pose_enabled == 0 || g_pose_result.valid == 0) {
         return;
     }
     pose_rgn_lazy_init();
@@ -2329,6 +2337,9 @@ static td_void pose_rgn_clear_now(td_void)
     (td_void)memset_s(&g_pose_result, sizeof(g_pose_result), 0, sizeof(g_pose_result));
     (td_void)memset_s(g_pose_kpt_show, sizeof(g_pose_kpt_show), 0, sizeof(g_pose_kpt_show));
     g_pose_valid_ts_set = TD_FALSE;
+    if (g_pose_rgn_enable == 0) {
+        return;
+    }
     if (g_pose_rgn_inited == TD_TRUE) {
         pose_rgn_hide_all_edges();
         if (g_pose_box_draw != 0) {
@@ -2342,7 +2353,7 @@ static td_void pose_rgn_expire_if_stale(td_void)
     struct timeval now;
     td_u32 age_ms;
 
-    if (g_pose_enabled == 0 || g_pose_rgn_inited != TD_TRUE) {
+    if (g_pose_rgn_enable == 0 || g_pose_enabled == 0 || g_pose_rgn_inited != TD_TRUE) {
         return;
     }
     if (g_pose_result.valid == 0 || g_pose_valid_ts_set == TD_FALSE) {
@@ -3299,6 +3310,13 @@ static td_bool hit_replay_src_is_nv21(td_u32 pixel_format)
     }
     if (force == 1) {
         return TD_TRUE;
+    }
+    /* attach AI 通道 NV12；专用回放 ch3 等为 NV21 */
+    if (g_replay_src_chn < 0) {
+        return TD_FALSE;
+    }
+    if ((ot_vpss_chn)g_replay_src_chn == g_attach_chn) {
+        return TD_FALSE;
     }
     if (pixel_format_is_nv21(pixel_format) == TD_TRUE) {
         return TD_TRUE;
@@ -4512,7 +4530,8 @@ static void draw_line_y_plane(unsigned char *y, td_u32 stride, td_u32 img_w, td_
     }
 }
 
-static td_void pose_stamp_on_replay_nv12(unsigned char *nv12, td_u32 dst_w, td_u32 dst_h, td_u32 stride)
+static td_void pose_stamp_on_replay_nv12_ex(unsigned char *nv12, td_u32 dst_w, td_u32 dst_h, td_u32 stride,
+    const pose_result_t *pose_in)
 {
     pose_result_t pose;
     float sx;
@@ -4520,11 +4539,11 @@ static td_void pose_stamp_on_replay_nv12(unsigned char *nv12, td_u32 dst_w, td_u
     float kpt_vis;
     int i;
 
-    if (nv12 == TD_NULL || g_pose_enabled == 0 || g_pose_result.valid == 0 ||
+    if (nv12 == TD_NULL || pose_in == TD_NULL || pose_in->valid == 0 ||
         g_pose_det_w == 0U || g_pose_det_h == 0U) {
         return;
     }
-    pose = g_pose_result;
+    pose = *pose_in;
     sx = (float)dst_w / (float)g_pose_det_w;
     sy = (float)dst_h / (float)g_pose_det_h;
     kpt_vis = yolo_env_get_float_default("WIDGET_POSE_KPT_VIS", 0.25f);
@@ -4548,6 +4567,14 @@ static td_void pose_stamp_on_replay_nv12(unsigned char *nv12, td_u32 dst_w, td_u
         y1 = (int)(pose.kpts[k1].y * sy + 0.5f);
         draw_line_y_plane(nv12, stride, dst_w, dst_h, x0, y0, x1, y1, 180, 2);
     }
+}
+
+static td_void pose_stamp_on_replay_nv12(unsigned char *nv12, td_u32 dst_w, td_u32 dst_h, td_u32 stride)
+{
+    if (g_pose_enabled == 0 || g_pose_result.valid == 0) {
+        return;
+    }
+    pose_stamp_on_replay_nv12_ex(nv12, dst_w, dst_h, stride, &g_pose_result);
 }
 
 static void draw_dets_on_nv12(unsigned char *nv12, td_u32 stride, td_u32 img_w, td_u32 img_h)
@@ -5317,7 +5344,9 @@ static void pose_postprocess_and_draw(const float *out_data, size_t out_float_nu
             g_pose_valid_ts_set = TD_TRUE;
         }
         if (prev.valid != 0 && bbox_shift >= g_pose_bbox_jump_px) {
-            pose_rgn_hide_all_edges();
+            if (g_pose_rgn_enable != 0) {
+                pose_rgn_hide_all_edges();
+            }
             g_pose_result = pose;
         } else {
             pose_apply_stabilized(&g_pose_result, &prev, &pose, motion);
@@ -5330,7 +5359,7 @@ static void pose_postprocess_and_draw(const float *out_data, size_t out_float_nu
     }
 
     pose_rgn_lazy_init();
-    if (g_pose_result.valid != 0) {
+    if (g_pose_rgn_enable != 0 && g_pose_result.valid != 0) {
         pose_rgn_update_skeleton(&g_pose_result, det_w, det_h);
     }
 }
@@ -5481,6 +5510,12 @@ static td_s32 ai_pose_load(const char *path)
                 printf("%lld%s", (long long)odims.dims[i], (i + 1 == odims.dimCount) ? "" : "x");
             }
             printf(" size=%zu\n", aclmdlGetOutputSizeByIndex(g_pose_model_desc, 0));
+        }
+        if (g_pose_rgn_enable != 0) {
+            printf("ai_pose: live skeleton RGN on (WIDGET_POSE_RGN=1)\n");
+        } else {
+            printf("ai_pose: live RGN off, replay stamp only (WIDGET_POSE_RGN=0)\n");
+            pose_rgn_deinit();
         }
     }
     return TD_SUCCESS;
@@ -6188,19 +6223,23 @@ static td_bool sample_vio_ai_recover_current_target(ot_vpss_grp grp, ot_vpss_chn
 /* ── 击球回放：环形缓冲 + 前后各 3s 导出 ── */
 #define HIT_REPLAY_W 960
 #define HIT_REPLAY_H 540
-#define HIT_REPLAY_FPS 10
-#define HIT_REPLAY_SUBMIT_BYTES ((size_t)4096U * 2176U * 3U / 2U)
+#define HIT_REPLAY_FPS 20
+#define HIT_REPLAY_VPSS_CHN_DEFAULT 3
+#define HIT_REPLAY_SUBMIT_BYTES ((size_t)1024U * 576U * 3U / 2U)
 #define HIT_REPLAY_SEC 2
 #define HIT_REPLAY_PRE_FRAMES (HIT_REPLAY_FPS * HIT_REPLAY_SEC)
 #define HIT_REPLAY_POST_FRAMES (HIT_REPLAY_FPS * HIT_REPLAY_SEC)
 #define HIT_REPLAY_TOTAL_FRAMES (HIT_REPLAY_PRE_FRAMES + HIT_REPLAY_POST_FRAMES)
 #define HIT_REPLAY_FRAME_BYTES ((size_t)HIT_REPLAY_W * (size_t)HIT_REPLAY_H * 3 / 2)
 #define HIT_REPLAY_REQ_PATH "/tmp/.widget_replay_req"
+#define HIT_REPLAY_POSE_REQ_PATH "/tmp/.widget_replay_pose_req"
 #define HIT_REPLAY_SESSION_PATH "/tmp/.widget_replay_session"
 #define HIT_REPLAY_DEFAULT_DIR "/opt/widget_ui/replays"
 
 typedef struct {
     unsigned char *nv12;
+    pose_result_t pose;
+    td_bool pose_valid;
 } hit_replay_slot_t;
 
 static hit_replay_slot_t g_hit_replay_ring[HIT_REPLAY_PRE_FRAMES];
@@ -6227,6 +6266,7 @@ static unsigned int g_hit_replay_pending_wr = 0;
 static unsigned int g_hit_replay_pending_rd = 0;
 static td_bool g_hit_replay_session_on = TD_FALSE;
 static struct timeval g_hit_replay_session_check = {0, 0};
+static td_s32 g_hit_replay_pose_eager_max = 3;
 
 typedef struct {
     unsigned char *nv12;
@@ -6391,16 +6431,41 @@ static td_void hit_replay_init_once(td_void)
         return;
     }
     g_hit_replay_inited = TD_TRUE;
-    g_replay_src_chn = hit_replay_env_int("WIDGET_REPLAY_VPSS_CHN", -1, -1, 3);
+    g_hit_replay_pose_eager_max = hit_replay_env_int("WIDGET_REPLAY_POSE_EAGER_MAX", 3, 0, 32);
+    g_replay_src_chn = hit_replay_env_int("WIDGET_REPLAY_VPSS_CHN", HIT_REPLAY_VPSS_CHN_DEFAULT, -1, 3);
     if (g_replay_live_ring != 0) {
-        printf("hit_replay: lazy alloc pre=%u post=%u @%dfps out=%ux%u src_chn=%d dir=%s\n",
+        printf("hit_replay: lazy alloc pre=%u post=%u @%dfps out=%ux%u src_chn=%d pose_eager=%d dir=%s\n",
             (unsigned int)HIT_REPLAY_PRE_FRAMES, (unsigned int)HIT_REPLAY_POST_FRAMES,
             HIT_REPLAY_FPS, (unsigned int)HIT_REPLAY_W, (unsigned int)HIT_REPLAY_H,
-            (int)g_replay_src_chn, hit_replay_dir_base());
+            (int)g_replay_src_chn, (int)g_hit_replay_pose_eager_max, hit_replay_dir_base());
     } else {
-        printf("hit_replay: post-only mode post=%u dir=%s (no live ring)\n",
-            (unsigned int)HIT_REPLAY_POST_FRAMES, hit_replay_dir_base());
+        printf("hit_replay: post-only mode post=%u pose_eager=%d dir=%s (no live ring)\n",
+            (unsigned int)HIT_REPLAY_POST_FRAMES, (int)g_hit_replay_pose_eager_max, hit_replay_dir_base());
     }
+}
+
+static td_void hit_replay_snapshot_pose(hit_replay_slot_t *slot)
+{
+    if (slot == TD_NULL) {
+        return;
+    }
+    if (g_pose_enabled != 0 && g_pose_result.valid != 0) {
+        slot->pose = g_pose_result;
+        slot->pose_valid = TD_TRUE;
+    } else {
+        (td_void)memset_s(&slot->pose, sizeof(slot->pose), 0, sizeof(slot->pose));
+        slot->pose_valid = TD_FALSE;
+    }
+}
+
+static td_void hit_replay_copy_slot(hit_replay_slot_t *dst, const hit_replay_slot_t *src)
+{
+    if ((dst == TD_NULL) || (src == TD_NULL) || (src->nv12 == TD_NULL) || (dst->nv12 == TD_NULL)) {
+        return;
+    }
+    (td_void)memcpy_s(dst->nv12, HIT_REPLAY_FRAME_BYTES, src->nv12, HIT_REPLAY_FRAME_BYTES);
+    dst->pose = src->pose;
+    dst->pose_valid = src->pose_valid;
 }
 
 static unsigned char *hit_replay_ring_slot(unsigned int idx)
@@ -6431,6 +6496,17 @@ static unsigned char *hit_replay_export_slot(unsigned int idx)
     return g_hit_replay_export[idx].nv12;
 }
 
+static td_u8 hit_replay_u8_clip(int v)
+{
+    if (v < 0) {
+        return 0;
+    }
+    if (v > 255) {
+        return 255;
+    }
+    return (td_u8)v;
+}
+
 static td_void hit_replay_nv12_to_rgb24(const unsigned char *nv12, unsigned char *rgb, td_u32 w, td_u32 h, td_bool is_nv21)
 {
     td_u32 y;
@@ -6442,38 +6518,63 @@ static td_void hit_replay_nv12_to_rgb24(const unsigned char *nv12, unsigned char
         for (x = 0; x < w; x++) {
             int yy = (int)y_plane[y * w + x];
             td_u32 uv_idx = (y / 2) * w + (x & ~1U);
-            int u;
-            int v;
+            int u_raw;
+            int v_raw;
+            int c;
+            int d;
+            int e;
+            int r;
+            int g;
+            int b;
 
             if (is_nv21 == TD_TRUE) {
-                v = (int)uv_plane[uv_idx] - 128;
-                u = (int)uv_plane[uv_idx + 1] - 128;
+                v_raw = (int)uv_plane[uv_idx];
+                u_raw = (int)uv_plane[uv_idx + 1];
             } else {
-                u = (int)uv_plane[uv_idx] - 128;
-                v = (int)uv_plane[uv_idx + 1] - 128;
+                u_raw = (int)uv_plane[uv_idx];
+                v_raw = (int)uv_plane[uv_idx + 1];
             }
-            int r = yy + ((359 * v) >> 8);
-            int g = yy - ((88 * u + 183 * v) >> 8);
-            int b = yy + ((454 * u) >> 8);
+            /* VPSS 输出为 BT.601 有限范围 (Y 16~235)，与 yolo_yuv420sp_to_bgr_u8 一致 */
+            c = yy - 16;
+            if (c < 0) {
+                c = 0;
+            }
+            d = u_raw - 128;
+            e = v_raw - 128;
+            r = (298 * c + 409 * e + 128) >> 8;
+            g = (298 * c - 100 * d - 208 * e + 128) >> 8;
+            b = (298 * c + 516 * d + 128) >> 8;
             size_t o = ((size_t)y * w + x) * 3;
-            rgb[o + 0] = (unsigned char)(r < 0 ? 0 : (r > 255 ? 255 : r));
-            rgb[o + 1] = (unsigned char)(g < 0 ? 0 : (g > 255 ? 255 : g));
-            rgb[o + 2] = (unsigned char)(b < 0 ? 0 : (b > 255 ? 255 : b));
+            rgb[o + 0] = hit_replay_u8_clip(r);
+            rgb[o + 1] = hit_replay_u8_clip(g);
+            rgb[o + 2] = hit_replay_u8_clip(b);
         }
     }
 }
 
-static td_s32 hit_replay_write_ppm(const char *path, const unsigned char *nv12)
+static td_s32 hit_replay_write_ppm(const char *path, const unsigned char *nv12,
+    const pose_result_t *pose, td_bool pose_valid)
 {
     FILE *fp = TD_NULL;
     unsigned char *rgb = TD_NULL;
+    unsigned char *work = TD_NULL;
     size_t rgb_sz = (size_t)HIT_REPLAY_W * (size_t)HIT_REPLAY_H * 3;
 
     rgb = (unsigned char *)malloc(rgb_sz);
     if (rgb == TD_NULL) {
         return TD_FAILURE;
     }
-    hit_replay_nv12_to_rgb24(nv12, rgb, HIT_REPLAY_W, HIT_REPLAY_H, TD_FALSE);
+    work = (unsigned char *)malloc(HIT_REPLAY_FRAME_BYTES);
+    if (work == TD_NULL) {
+        free(rgb);
+        return TD_FAILURE;
+    }
+    (td_void)memcpy_s(work, HIT_REPLAY_FRAME_BYTES, nv12, HIT_REPLAY_FRAME_BYTES);
+    if (pose_valid == TD_TRUE && pose != TD_NULL) {
+        pose_stamp_on_replay_nv12_ex(work, HIT_REPLAY_W, HIT_REPLAY_H, HIT_REPLAY_W, pose);
+    }
+    hit_replay_nv12_to_rgb24(work, rgb, HIT_REPLAY_W, HIT_REPLAY_H, TD_FALSE);
+    free(work);
     fp = fopen(path, "wb");
     if (fp == TD_NULL) {
         free(rgb);
@@ -6490,45 +6591,167 @@ static td_s32 hit_replay_write_ppm(const char *path, const unsigned char *nv12)
     return TD_SUCCESS;
 }
 
+static td_s32 hit_replay_write_raw_frame(const char *raw_dir, unsigned int idx, const unsigned char *nv12,
+    const pose_result_t *pose, td_bool pose_valid)
+{
+    char nv12_path[320];
+    char pose_path[320];
+    FILE *fp = TD_NULL;
+    td_u8 valid_flag = (pose_valid == TD_TRUE) ? 1U : 0U;
+
+    (void)snprintf_s(nv12_path, sizeof(nv12_path), sizeof(nv12_path) - 1,
+        "%s/frame_%04u.nv12", raw_dir, idx);
+    fp = fopen(nv12_path, "wb");
+    if (fp == TD_NULL) {
+        return TD_FAILURE;
+    }
+    if (fwrite(nv12, 1, HIT_REPLAY_FRAME_BYTES, fp) != HIT_REPLAY_FRAME_BYTES) {
+        fclose(fp);
+        return TD_FAILURE;
+    }
+    fclose(fp);
+
+    (void)snprintf_s(pose_path, sizeof(pose_path), sizeof(pose_path) - 1,
+        "%s/frame_%04u.pose", raw_dir, idx);
+    fp = fopen(pose_path, "wb");
+    if (fp == TD_NULL) {
+        return TD_FAILURE;
+    }
+    if (fwrite(&valid_flag, 1, 1, fp) != 1) {
+        fclose(fp);
+        return TD_FAILURE;
+    }
+    if ((valid_flag != 0U) && (pose != TD_NULL) &&
+        fwrite(pose, 1, sizeof(pose_result_t), fp) != sizeof(pose_result_t)) {
+        fclose(fp);
+        return TD_FAILURE;
+    }
+    fclose(fp);
+    return TD_SUCCESS;
+}
+
+static td_s32 hit_replay_read_raw_frame(const char *raw_dir, unsigned int idx, unsigned char *nv12,
+    pose_result_t *pose, td_bool *pose_valid)
+{
+    char nv12_path[320];
+    char pose_path[320];
+    FILE *fp = TD_NULL;
+    td_u8 valid_flag = 0;
+
+    (void)snprintf_s(nv12_path, sizeof(nv12_path), sizeof(nv12_path) - 1,
+        "%s/frame_%04u.nv12", raw_dir, idx);
+    fp = fopen(nv12_path, "rb");
+    if (fp == TD_NULL) {
+        return TD_FAILURE;
+    }
+    if (fread(nv12, 1, HIT_REPLAY_FRAME_BYTES, fp) != HIT_REPLAY_FRAME_BYTES) {
+        fclose(fp);
+        return TD_FAILURE;
+    }
+    fclose(fp);
+
+    if (pose_valid != TD_NULL) {
+        *pose_valid = TD_FALSE;
+    }
+    (void)snprintf_s(pose_path, sizeof(pose_path), sizeof(pose_path) - 1,
+        "%s/frame_%04u.pose", raw_dir, idx);
+    fp = fopen(pose_path, "rb");
+    if (fp == TD_NULL) {
+        return TD_SUCCESS;
+    }
+    if (fread(&valid_flag, 1, 1, fp) != 1) {
+        fclose(fp);
+        return TD_FAILURE;
+    }
+    if ((valid_flag != 0U) && (pose != TD_NULL) &&
+        fread(pose, 1, sizeof(pose_result_t), fp) == sizeof(pose_result_t)) {
+        if (pose_valid != TD_NULL) {
+            *pose_valid = TD_TRUE;
+        }
+    }
+    fclose(fp);
+    return TD_SUCCESS;
+}
+
 typedef struct {
     char session[96];
     int hit_idx;
     unsigned int frame_count;
     unsigned char *frames[HIT_REPLAY_TOTAL_FRAMES];
+    pose_result_t poses[HIT_REPLAY_TOTAL_FRAMES];
+    td_bool pose_valid[HIT_REPLAY_TOTAL_FRAMES];
 } hit_replay_export_job_t;
 
-static td_void *hit_replay_export_thread(td_void *arg)
+typedef struct {
+    char session[96];
+    int hit_idx;
+} hit_replay_pose_job_t;
+
+static td_void *hit_replay_pose_render_thread(td_void *arg)
 {
-    hit_replay_export_job_t *job = (hit_replay_export_job_t *)arg;
+    hit_replay_pose_job_t *job = (hit_replay_pose_job_t *)arg;
     char out_dir[256];
+    char raw_dir[280];
     char meta_path[280];
     char done_path[280];
     char mp4_path[280];
     char cmd[640];
+    unsigned int count = 0;
     unsigned int i;
-    td_s32 fps = hit_replay_env_int("WIDGET_REPLAY_FPS", HIT_REPLAY_FPS, 8, 30);
+    td_s32 fps;
 
     if (job == TD_NULL) {
         return TD_NULL;
     }
+    fps = hit_replay_env_int("WIDGET_REPLAY_FPS", HIT_REPLAY_FPS, 8, 30);
     (void)snprintf_s(out_dir, sizeof(out_dir), sizeof(out_dir) - 1, "%s/%s/hit_%d",
         hit_replay_dir_base(), job->session, job->hit_idx);
-    (void)hit_replay_mkdir_p(out_dir);
-    for (i = 0; i < job->frame_count; i++) {
-        char frame_path[320];
-        (void)snprintf_s(frame_path, sizeof(frame_path), sizeof(frame_path) - 1,
-            "%s/frame_%04u.ppm", out_dir, i + 1);
-        if (job->frames[i] != TD_NULL) {
-            (td_void)hit_replay_write_ppm(frame_path, job->frames[i]);
-        }
-    }
+    (void)snprintf_s(raw_dir, sizeof(raw_dir), sizeof(raw_dir) - 1, "%s/raw", out_dir);
     (void)snprintf_s(meta_path, sizeof(meta_path), sizeof(meta_path) - 1, "%s/meta.txt", out_dir);
     {
-        FILE *meta = fopen(meta_path, "w");
-        if (meta != TD_NULL) {
-            (void)fprintf(meta, "width=%u\nheight=%u\nfps=%d\ncount=%u\n",
-                (unsigned int)HIT_REPLAY_W, (unsigned int)HIT_REPLAY_H, fps, job->frame_count);
-            fclose(meta);
+        FILE *mr = fopen(meta_path, "r");
+        char line[96];
+        if (mr != TD_NULL) {
+            while (fgets(line, (int)sizeof(line), mr) != TD_NULL) {
+                unsigned int c = 0;
+                if (sscanf(line, "count=%u", &c) == 1) {
+                    count = c;
+                }
+            }
+            fclose(mr);
+        }
+    }
+    if (count == 0) {
+        printf("hit_replay: pose render skip session=%s hit=%d (no meta count)\n", job->session, job->hit_idx);
+        free(job);
+        return TD_NULL;
+    }
+    for (i = 1; i <= count; i++) {
+        char frame_path[320];
+        unsigned char *nv12 = TD_NULL;
+        pose_result_t pose;
+        td_bool pose_valid = TD_FALSE;
+
+        nv12 = (unsigned char *)malloc(HIT_REPLAY_FRAME_BYTES);
+        if (nv12 == TD_NULL) {
+            break;
+        }
+        if (hit_replay_read_raw_frame(raw_dir, i, nv12, &pose, &pose_valid) != TD_SUCCESS) {
+            free(nv12);
+            break;
+        }
+        (void)snprintf_s(frame_path, sizeof(frame_path), sizeof(frame_path) - 1,
+            "%s/frame_%04u.ppm", out_dir, i);
+        (td_void)hit_replay_write_ppm(frame_path, nv12,
+            pose_valid == TD_TRUE ? &pose : TD_NULL, pose_valid);
+        free(nv12);
+    }
+    {
+        FILE *mw = fopen(meta_path, "w");
+        if (mw != TD_NULL) {
+            (void)fprintf(mw, "width=%u\nheight=%u\nfps=%d\ncount=%u\npose=1\nstage=done\n",
+                (unsigned int)HIT_REPLAY_W, (unsigned int)HIT_REPLAY_H, fps, count);
+            fclose(mw);
         }
     }
     (void)snprintf_s(mp4_path, sizeof(mp4_path), sizeof(mp4_path) - 1, "%s/%s/hit_%d.mp4",
@@ -6546,8 +6769,86 @@ static td_void *hit_replay_export_thread(td_void *arg)
             fclose(done);
         }
     }
-    printf("hit_replay: exported session=%s hit=%d frames=%u dir=%s\n",
-        job->session, job->hit_idx, job->frame_count, out_dir);
+    printf("hit_replay: pose rendered session=%s hit=%d frames=%u\n", job->session, job->hit_idx, count);
+    free(job);
+    return TD_NULL;
+}
+
+static td_void *hit_replay_export_thread(td_void *arg)
+{
+    hit_replay_export_job_t *job = (hit_replay_export_job_t *)arg;
+    char out_dir[256];
+    char raw_dir[280];
+    char meta_path[280];
+    char done_path[280];
+    char mp4_path[280];
+    char cmd[640];
+    unsigned int i;
+    td_s32 fps = hit_replay_env_int("WIDGET_REPLAY_FPS", HIT_REPLAY_FPS, 8, 30);
+    td_bool pose_eager = (job != TD_NULL && job->hit_idx > 0 &&
+        job->hit_idx <= g_hit_replay_pose_eager_max) ? TD_TRUE : TD_FALSE;
+
+    if (job == TD_NULL) {
+        return TD_NULL;
+    }
+    (void)snprintf_s(out_dir, sizeof(out_dir), sizeof(out_dir) - 1, "%s/%s/hit_%d",
+        hit_replay_dir_base(), job->session, job->hit_idx);
+    (void)hit_replay_mkdir_p(out_dir);
+    if (pose_eager == TD_TRUE) {
+        for (i = 0; i < job->frame_count; i++) {
+            char frame_path[320];
+            (void)snprintf_s(frame_path, sizeof(frame_path), sizeof(frame_path) - 1,
+                "%s/frame_%04u.ppm", out_dir, i + 1);
+            if (job->frames[i] != TD_NULL) {
+                (td_void)hit_replay_write_ppm(frame_path, job->frames[i],
+                    job->pose_valid[i] == TD_TRUE ? &job->poses[i] : TD_NULL, job->pose_valid[i]);
+            }
+        }
+        (void)snprintf_s(mp4_path, sizeof(mp4_path), sizeof(mp4_path) - 1, "%s/%s/hit_%d.mp4",
+            hit_replay_dir_base(), job->session, job->hit_idx);
+        (void)snprintf_s(cmd, sizeof(cmd), sizeof(cmd) - 1,
+            "command -v ffmpeg >/dev/null 2>&1 && ffmpeg -y -loglevel error -framerate %d "
+            "-i '%s/frame_%%04d.ppm' -c:v libx264 -pix_fmt yuv420p -crf 20 -preset fast -an '%s' 2>/dev/null",
+            fps, out_dir, mp4_path);
+        (td_void)system(cmd);
+    } else {
+        (void)snprintf_s(raw_dir, sizeof(raw_dir), sizeof(raw_dir) - 1, "%s/raw", out_dir);
+        (void)hit_replay_mkdir_p(raw_dir);
+        for (i = 0; i < job->frame_count; i++) {
+            if (job->frames[i] != TD_NULL) {
+                (td_void)hit_replay_write_raw_frame(raw_dir, i + 1, job->frames[i],
+                    job->pose_valid[i] == TD_TRUE ? &job->poses[i] : TD_NULL, job->pose_valid[i]);
+            }
+        }
+        printf("hit_replay: raw saved session=%s hit=%d frames=%u (pose deferred)\n",
+            job->session, job->hit_idx, job->frame_count);
+    }
+    (void)snprintf_s(meta_path, sizeof(meta_path), sizeof(meta_path) - 1, "%s/meta.txt", out_dir);
+    {
+        FILE *meta = fopen(meta_path, "w");
+        if (meta != TD_NULL) {
+            if (pose_eager == TD_TRUE) {
+                (void)fprintf(meta, "width=%u\nheight=%u\nfps=%d\ncount=%u\npose=1\nstage=done\n",
+                    (unsigned int)HIT_REPLAY_W, (unsigned int)HIT_REPLAY_H, fps, job->frame_count);
+            } else {
+                (void)fprintf(meta, "width=%u\nheight=%u\nfps=%d\ncount=%u\npose=0\nstage=raw\n",
+                    (unsigned int)HIT_REPLAY_W, (unsigned int)HIT_REPLAY_H, fps, job->frame_count);
+            }
+            fclose(meta);
+        }
+    }
+    (void)snprintf_s(done_path, sizeof(done_path), sizeof(done_path) - 1, "%s/done.flag", out_dir);
+    {
+        FILE *done = fopen(done_path, "w");
+        if (done != TD_NULL) {
+            (void)fprintf(done, "ok\n");
+            fclose(done);
+        }
+    }
+    if (pose_eager == TD_TRUE) {
+        printf("hit_replay: exported session=%s hit=%d frames=%u dir=%s\n",
+            job->session, job->hit_idx, job->frame_count, out_dir);
+    }
     for (i = 0; i < job->frame_count; i++) {
         free(job->frames[i]);
         job->frames[i] = TD_NULL;
@@ -6582,6 +6883,8 @@ static td_void hit_replay_start_export(td_void)
         }
         (void)memcpy_s(job->frames[job->frame_count], HIT_REPLAY_FRAME_BYTES,
             g_hit_replay_export[i].nv12, HIT_REPLAY_FRAME_BYTES);
+        job->poses[job->frame_count] = g_hit_replay_export[i].pose;
+        job->pose_valid[job->frame_count] = g_hit_replay_export[i].pose_valid;
         job->frame_count++;
     }
     g_hit_replay_export_count = 0;
@@ -6629,7 +6932,6 @@ static td_void hit_replay_start_capture_locked(const char *session, int hit_idx)
     unsigned int start;
     unsigned int count;
     unsigned int dst;
-    unsigned char *dst_buf;
 
     (void)strncpy_s(g_hit_replay_session, sizeof(g_hit_replay_session), session, sizeof(g_hit_replay_session) - 1);
     g_hit_replay_hit_idx = hit_idx;
@@ -6650,17 +6952,16 @@ static td_void hit_replay_start_capture_locked(const char *session, int hit_idx)
                 continue;
             }
             dst = g_hit_replay_export_count++;
-            dst_buf = hit_replay_export_slot(dst);
-            if (dst_buf != TD_NULL) {
-                (td_void)memcpy_s(dst_buf, HIT_REPLAY_FRAME_BYTES,
-                    g_hit_replay_ring[src_idx].nv12, HIT_REPLAY_FRAME_BYTES);
+            if (hit_replay_export_slot(dst) != TD_NULL) {
+                hit_replay_copy_slot(&g_hit_replay_export[dst], &g_hit_replay_ring[src_idx]);
             }
         }
     }
     g_hit_replay_capturing_post = TD_TRUE;
     g_hit_replay_post_left = HIT_REPLAY_POST_FRAMES;
-    printf("hit_replay: trigger session=%s hit=%d pre=%u post=%u live=%d\n",
-        session, hit_idx, count, (unsigned int)HIT_REPLAY_POST_FRAMES, g_replay_live_ring);
+    printf("hit_replay: trigger session=%s hit=%d pre=%u post=%u live=%d pose_eager=%d\n",
+        session, hit_idx, count, (unsigned int)HIT_REPLAY_POST_FRAMES, g_replay_live_ring,
+        (hit_idx <= g_hit_replay_pose_eager_max) ? 1 : 0);
 }
 
 static td_void hit_replay_drain_pending_locked(td_void)
@@ -6775,23 +7076,24 @@ static td_void hit_replay_push_scaled(const ot_video_frame_info *frame_info)
                 }
             }
             hit_replay_scale_to_out(resize_src, src_w, src_h, src_stride_y, src_stride_uv, src_is_nv21, slot);
-            pose_stamp_on_replay_nv12(slot, HIT_REPLAY_W, HIT_REPLAY_H, HIT_REPLAY_W);
+            hit_replay_snapshot_pose(&g_hit_replay_ring[ring_idx]);
             free(packed_src);
         }
 
         if ((g_hit_replay_capturing_post == TD_TRUE) &&
             (g_hit_replay_export_count < HIT_REPLAY_TOTAL_FRAMES) && (slot != TD_NULL)) {
-            unsigned char *exp = hit_replay_export_slot(g_hit_replay_export_count);
+            unsigned int exp_idx = g_hit_replay_export_count;
 
-            if (exp != TD_NULL) {
-                (void)memcpy_s(exp, HIT_REPLAY_FRAME_BYTES, slot, HIT_REPLAY_FRAME_BYTES);
+            if (hit_replay_export_slot(exp_idx) != TD_NULL) {
+                hit_replay_copy_slot(&g_hit_replay_export[exp_idx], &g_hit_replay_ring[ring_idx]);
                 g_hit_replay_export_count++;
             }
         }
     } else if ((g_hit_replay_capturing_post == TD_TRUE) &&
         (g_hit_replay_export_count < HIT_REPLAY_TOTAL_FRAMES) &&
         (src_y != TD_NULL) && (src_uv != TD_NULL)) {
-        unsigned char *exp = hit_replay_export_slot(g_hit_replay_export_count);
+        unsigned int exp_idx = g_hit_replay_export_count;
+        unsigned char *exp = hit_replay_export_slot(exp_idx);
         if (exp != TD_NULL) {
             const unsigned char *resize_src = src_y;
             unsigned char *packed_src = TD_NULL;
@@ -6806,7 +7108,7 @@ static td_void hit_replay_push_scaled(const ot_video_frame_info *frame_info)
                 }
             }
             hit_replay_scale_to_out(resize_src, src_w, src_h, src_stride_y, src_stride_uv, src_is_nv21, exp);
-            pose_stamp_on_replay_nv12(exp, HIT_REPLAY_W, HIT_REPLAY_H, HIT_REPLAY_W);
+            hit_replay_snapshot_pose(&g_hit_replay_export[exp_idx]);
             free(packed_src);
             g_hit_replay_export_count++;
         }
@@ -6911,12 +7213,41 @@ static td_bool hit_replay_copy_submit_locked(const ot_video_frame_info *frame_in
     return TD_TRUE;
 }
 
+static td_bool hit_replay_uses_dedicated_chn(td_void)
+{
+    hit_replay_init_once();
+    return (g_replay_src_chn >= 0) && ((ot_vpss_chn)g_replay_src_chn != g_attach_chn);
+}
+
 static td_void *hit_replay_worker_thread(td_void *arg)
 {
     ot_video_frame_info frame_info;
 
     (void)arg;
     while (g_replay_worker_run != 0) {
+        if (hit_replay_needs_frames() != TD_TRUE) {
+            hit_replay_deinit();
+            usleep(100000);
+            continue;
+        }
+
+        if (hit_replay_uses_dedicated_chn() == TD_TRUE) {
+            ot_video_frame_info replay_frame;
+            td_s32 get_ret;
+
+            (td_void)memset_s(&replay_frame, sizeof(replay_frame), 0, sizeof(replay_frame));
+            get_ret = ss_mpi_vpss_get_chn_frame(g_attach_grp, (ot_vpss_chn)g_replay_src_chn,
+                &replay_frame, 0);
+            if (get_ret != TD_SUCCESS) {
+                usleep(30000);
+                continue;
+            }
+            hit_replay_process_frame(&replay_frame);
+            (td_void)ss_mpi_vpss_release_chn_frame(g_attach_grp, (ot_vpss_chn)g_replay_src_chn,
+                &replay_frame);
+            continue;
+        }
+
         (td_void)pthread_mutex_lock(&g_replay_worker_mtx);
         while ((g_replay_worker_run != 0) && (g_replay_submit.pending != TD_TRUE)) {
             (td_void)pthread_cond_wait(&g_replay_worker_cv, &g_replay_worker_mtx);
@@ -6984,7 +7315,12 @@ static td_void hit_replay_submit_frame(const ot_video_frame_info *frame_info)
     }
     hit_replay_init_once();
 
-    /* 勿从 VPSS ch0 取帧：ch0 与骨骼 RGN/VO 预览共用，抢帧会导致骨骼消失、进程不稳定 */
+    /* VPSS ch3 等专用回放通道：worker 按 WIDGET_REPLAY_FPS 取帧，勿用 attach 方图 */
+    if (hit_replay_uses_dedicated_chn() == TD_TRUE) {
+        hit_replay_worker_start();
+        return;
+    }
+
     if (g_replay_live_ring != 0) {
         hit_replay_worker_start();
         if (g_replay_worker_on != TD_TRUE) {
@@ -7009,6 +7345,53 @@ static td_void hit_replay_submit_frame(const ot_video_frame_info *frame_info)
 static td_void hit_replay_feed_frame(const ot_video_frame_info *frame_info)
 {
     hit_replay_submit_frame(frame_info);
+}
+
+static td_void hit_replay_request_pose_render(const char *session, int hit_idx)
+{
+    hit_replay_pose_job_t *job = TD_NULL;
+    pthread_t tid;
+
+    if ((session == TD_NULL) || (session[0] == '\0') || (hit_idx <= 0)) {
+        return;
+    }
+    job = (hit_replay_pose_job_t *)calloc(1, sizeof(*job));
+    if (job == TD_NULL) {
+        return;
+    }
+    (void)strncpy_s(job->session, sizeof(job->session), session, sizeof(job->session) - 1);
+    job->hit_idx = hit_idx;
+    if (pthread_create(&tid, TD_NULL, hit_replay_pose_render_thread, job) != 0) {
+        free(job);
+        printf("hit_replay: pose render thread create failed session=%s hit=%d\n", session, hit_idx);
+        return;
+    }
+    (void)pthread_detach(tid);
+}
+
+static td_void hit_replay_poll_pose_trigger(td_void)
+{
+    FILE *fp = TD_NULL;
+    char line[160];
+    char session[96];
+    int hit_idx = 0;
+    td_bool got_any = TD_FALSE;
+
+    fp = fopen(HIT_REPLAY_POSE_REQ_PATH, "r");
+    if (fp == TD_NULL) {
+        return;
+    }
+    while (fgets(line, (int)sizeof(line), fp) != TD_NULL) {
+        if (sscanf(line, "%95s %d", session, &hit_idx) != 2) {
+            continue;
+        }
+        hit_replay_request_pose_render(session, hit_idx);
+        got_any = TD_TRUE;
+    }
+    fclose(fp);
+    if (got_any == TD_TRUE) {
+        (void)remove(HIT_REPLAY_POSE_REQ_PATH);
+    }
 }
 
 static td_void hit_replay_poll_trigger(td_void)
@@ -7132,6 +7515,7 @@ static td_void vio_ai_loop(ot_vpss_grp grp, ot_vpss_chn chn)
             if (vio_ai_own_frame(&frame, &owned) == TD_SUCCESS) {
                 (td_void)ss_mpi_vpss_release_chn_frame(cur_grp, cur_chn, &frame);
                 hit_replay_poll_trigger();
+                hit_replay_poll_pose_trigger();
                 infer_ret = ai_infer_from_nv12(&owned.info);
                 if ((infer_ret == TD_SUCCESS) && (g_pose_enabled != 0) &&
                     (g_attach_pipeline_mode != TD_FALSE) && (g_pose_ch1_only != 0)) {
@@ -7142,7 +7526,11 @@ static td_void vio_ai_loop(ot_vpss_grp grp, ot_vpss_chn chn)
                         (td_void)ai_pose_infer(&owned.info);
                     }
                 }
-                hit_replay_submit_frame(&owned.info);
+                if (hit_replay_uses_dedicated_chn() != TD_TRUE) {
+                    hit_replay_submit_frame(&owned.info);
+                } else {
+                    hit_replay_submit_frame(TD_NULL);
+                }
                 vio_ai_disown_frame(&owned);
             } else {
                 (td_void)ss_mpi_vpss_release_chn_frame(cur_grp, cur_chn, &frame);

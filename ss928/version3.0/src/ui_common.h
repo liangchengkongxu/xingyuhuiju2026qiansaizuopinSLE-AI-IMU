@@ -74,9 +74,12 @@ QString replaySessionDir(const QString &sessionId);
 QString replayHitMp4Path(const QString &sessionId, int hitIdx);
 QString replayHitFramesDir(const QString &sessionId, int hitIdx);
 QString resolveReplayClip(const QString &sessionId, int hitIdx);
+int replayPoseEagerMax();
+bool replayHitNeedsPoseRender(const QString &sessionId, int hitIdx);
 void publishReplaySession(const QString &sessionId);
 void clearReplaySession();
 void requestHitReplayCapture(const QString &sessionId, int hitIdx);
+void requestHitReplayPoseRender(const QString &sessionId, int hitIdx);
 QString formatPlaybackSpeedRate(double rate);
 
 QString cardStyle();

@@ -225,15 +225,41 @@ QString resolveReplayClip(const QString &sessionId, int hitIdx)
     if (QFileInfo::exists(mp4))
         return mp4;
     const QString dir = replayHitFramesDir(sessionId, hitIdx);
-    if (QFileInfo::exists(dir + QStringLiteral("/done.flag"))) {
-        if (QFileInfo::exists(mp4))
-            return mp4;
-        return dir;
-    }
     const QDir framesDir(dir);
-    if (framesDir.exists() && !framesDir.entryList(QStringList() << QStringLiteral("frame_*.ppm"), QDir::Files).isEmpty())
+    const bool hasPpm = framesDir.exists()
+        && !framesDir.entryList(QStringList() << QStringLiteral("frame_*.ppm"), QDir::Files).isEmpty();
+    if (QFileInfo::exists(dir + QStringLiteral("/done.flag"))) {
+        if (hasPpm)
+            return dir;
+        return QString();
+    }
+    if (hasPpm)
         return dir;
     return QString();
+}
+
+int replayPoseEagerMax()
+{
+    bool ok = false;
+    const int v = qEnvironmentVariableIntValue("WIDGET_REPLAY_POSE_EAGER_MAX", &ok);
+    if (!ok || v < 0)
+        return 3;
+    return v;
+}
+
+bool replayHitNeedsPoseRender(const QString &sessionId, int hitIdx)
+{
+    if (sessionId.isEmpty() || hitIdx <= 0)
+        return false;
+    const QString dir = replayHitFramesDir(sessionId, hitIdx);
+    if (!QFileInfo::exists(dir + QStringLiteral("/done.flag")))
+        return false;
+    const QDir framesDir(dir);
+    if (!framesDir.entryList(QStringList() << QStringLiteral("frame_*.ppm"), QDir::Files).isEmpty())
+        return false;
+    const QDir rawDir(dir + QStringLiteral("/raw"));
+    return rawDir.exists()
+        && !rawDir.entryList(QStringList() << QStringLiteral("frame_*.nv12"), QDir::Files).isEmpty();
 }
 
 void publishReplaySession(const QString &sessionId)
@@ -256,6 +282,16 @@ void requestHitReplayCapture(const QString &sessionId, int hitIdx)
         return;
     QDir().mkpath(replaySessionDir(sessionId));
     QFile f(QStringLiteral("/tmp/.widget_replay_req"));
+    if (f.open(QIODevice::WriteOnly | QIODevice::Append)) {
+        f.write(QStringLiteral("%1 %2\n").arg(sessionId).arg(hitIdx).toUtf8());
+    }
+}
+
+void requestHitReplayPoseRender(const QString &sessionId, int hitIdx)
+{
+    if (sessionId.isEmpty() || hitIdx <= 0)
+        return;
+    QFile f(QStringLiteral("/tmp/.widget_replay_pose_req"));
     if (f.open(QIODevice::WriteOnly | QIODevice::Append)) {
         f.write(QStringLiteral("%1 %2\n").arg(sessionId).arg(hitIdx).toUtf8());
     }

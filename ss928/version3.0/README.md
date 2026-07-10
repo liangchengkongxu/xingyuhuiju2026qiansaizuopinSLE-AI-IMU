@@ -14,7 +14,7 @@
 
 | 模式 | 说明 |
 |------|------|
-| 单人练习 | 选技能、绑拍柄，摄像头 AI + IMU 三路 OR 触发，**骨骼 RGN 叠加**，击球回放，教学视频与 AI 评分 |
+| 单人练习 | 选技能、绑拍柄，摄像头 AI + IMU 三路 OR 触发，**回放软件画骨骼**（实时预览默认无骨骼），击球回放，教学视频与 AI 评分 |
 | 对打 / 比赛 | 最多 4 台拍柄，双栏计分，IMU 触发 + 视觉更新击球类型 |
 | 班级同训 | 无摄像头，1D CNN 识别 6 类击球，学员卡片实时统计 |
 
@@ -59,10 +59,10 @@ version3.0/
 
 ```
 VI(OS08A20) → VPSS grp0
-  ├─ ch0  3840×2160  预览 + Region 人体框 + **Pose 骨骼线**
+  ├─ ch0  3840×2160  预览 + Region 人体框（实时骨骼 RGN 默认关）
   ├─ ch1   224×224   NV12 → 分类模型 best_aipp_fix.om → softmax 5 类
-  ├─ ch1   640×640   attach 帧（AI 主循环 + **击球回放采集源**）
-  └─ ch2   640×640   NV12 → 人体检测 / Pose best_pose_aipp.om
+  ├─ ch2   640×640   attach 帧（AI 主循环 + Pose 推理）
+  └─ ch3   960×540   击球回放专用（不 bind VO，worker 取帧）
 
 vo_gfbg_init
   → camera_pipe 启 VI/VPSS/VO
@@ -219,28 +219,32 @@ export WIDGET_IMU_RULE_SWING_ON_DYN=4
 
 ## 骨骼 Pose 与单人击球回放（2026-07）
 
-### 骨骼 RGN
+### 骨骼（实时 vs 回放）
 
-- 模型：`/opt/widget_ui/models/best_pose_aipp.om`（VPSS ch2 640×640）
-- 19 条骨架线通过 Region 叠加在 **ch0 预览**上（与实时画面一致）
-- 调参：`WIDGET_POSE_CONF`、`WIDGET_POSE_KPT_VIS`、`WIDGET_POSE_INTERVAL` 等（见 `run.sh`）
+- 模型：`/opt/widget_ui/models/best_pose_aipp.om`（VPSS ch1/ch2 640×640 推理）
+- **实时预览**：默认 `WIDGET_POSE_RGN=0`，HDMI/面板**不画**硬件骨骼（减轻 RGN 与 ch0 抢资源）
+- **击球回放**：`pose_stamp_on_replay_nv12()` 软件画骨架到导出 PPM；BT.601 limited-range 转 RGB
+- 若需恢复实时骨骼：设 `WIDGET_POSE_RGN=1` 后重启
 
 ```bash
-tail -f /tmp/sample_vio_ai.log | grep -E 'infer fps|pose rgn'
+tail -f /tmp/sample_vio_ai.log | grep -E 'infer fps|ai_pose|hit_replay'
 cat /proc/umap/npudev
 ```
 
 ### 击球回放
 
-- 训练页每次击球 → `sample_vio_ai` 采集前后各 2s → `/opt/widget_ui/replays/{session}/hit_{N}/`
+- 训练页每次击球 → `sample_vio_ai` 从 **VPSS ch3** 采集前后各 2s → `/opt/widget_ui/replays/{session}/hit_{N}/`
 - 总结页 / 动作详情页播放；板端无 ffmpeg 时用 **PPM 帧序列**（`FrameReplayWidget`）
-- 当前输出 **960×540**；采集源为 attach 通道 640×640（letterbox），**勿从 ch0 抢帧**
+- 输出 **960×540 @ 20fps**；前 3 次击球立即导出带骨骼 PPM，第 4 次起仅存 raw，**点进详情页再渲染骨骼**
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
+| `WIDGET_POSE_RGN` | `0` | 实时 RGN 骨骼（0=关，仅回放 stamp） |
 | `WIDGET_REPLAY_LIVE` | `1` | 击球前环形缓冲 |
-| `WIDGET_REPLAY_FPS` | `10` | 回放帧率 |
-| `WIDGET_REPLAY_VPSS_CHN` | `-1` | **保持 -1**；设为 0 会导致骨骼消失 |
+| `WIDGET_REPLAY_FPS` | `20` | 回放采集/导出帧率 |
+| `WIDGET_REPLAY_VPSS_CHN` | `3` | 回放专用通道（**勿用 0**，会抢 ch0 预览） |
+| `WIDGET_REPLAY_POSE_EAGER_MAX` | `3` | 立即渲染骨骼的击球序号上限 |
+| `WIDGET_REPLAY_SRC_NV21` | `1` | ch3 回放 UV 顺序 |
 
 Agent 详细说明：[`skill/hit-replay-and-pose-rgn.md`](skill/hit-replay-and-pose-rgn.md)
 
@@ -395,12 +399,14 @@ scp tutorials/*.mp4 root@192.168.1.168:/opt/widget_ui/tutorials/
 | `WIDGET_IMU_RULE_*` | 见上文 IMU 节 | 规则 FSM 阈值 |
 | `WIDGET_WS73_SKIP_WIFI` | `1` | 跳过 `wifi_sta.sh` 避免刷屏 |
 | `WIDGET_WS73_SKIP_LEGACY_CLIENT` | `1` | 跳过旧 `sle_client.sh` |
+| `WIDGET_POSE_RGN` | `0` | 实时 RGN 骨骼（0=关） |
 | `WIDGET_POSE_CONF` | `0.10` | Pose 检测置信度 |
 | `WIDGET_POSE_KPT_VIS` | `0.25` | 关键点显示阈值 |
 | `WIDGET_POSE_INTERVAL` | `2` | 骨骼每 N 帧推理一次 |
 | `WIDGET_REPLAY_LIVE` | `1` | 击球回放 live 环形缓冲 |
-| `WIDGET_REPLAY_FPS` | `10` | 回放采集帧率 |
-| `WIDGET_REPLAY_VPSS_CHN` | `-1` | 回放 VPSS 通道（**勿用 0**） |
+| `WIDGET_REPLAY_FPS` | `20` | 回放采集帧率 |
+| `WIDGET_REPLAY_VPSS_CHN` | `3` | 回放 VPSS 通道（**勿用 0**） |
+| `WIDGET_REPLAY_POSE_EAGER_MAX` | `3` | 立即导出骨骼的回放条数 |
 | `ASCEND_AICPU_KERNEL_PATH` | `/opt/lib/npu` | ACL AICPU 算子（IMU CNN 必需） |
 | `LD_LIBRARY_PATH` | — | 需含 `/opt/lib/npu`（run.sh 已设置） |
 
@@ -529,19 +535,22 @@ bash run.sh
 
 ### 11. 骨骼不显示 / 回放后系统异常
 
-**原因**：曾从 **VPSS ch0** 高频取帧做回放，与 RGN 骨骼、VO 预览抢同一通道，导致预览饿死、`sample_vio_ai` 反复崩溃、`vb_set_conf failed`。
+**原因**：从 **VPSS ch0** 高频取帧做回放，与 VO 预览抢同一通道，导致预览饿死、`sample_vio_ai` 反复崩溃、`vb_set_conf failed`。
 
 **处理**：
 
-- `WIDGET_REPLAY_VPSS_CHN=-1`（默认，用 attach 640 源 + letterbox）
+- `WIDGET_REPLAY_VPSS_CHN=3`（专用 960×540 回放通道，勿用 0/ch0）
+- 实时骨骼默认关（`WIDGET_POSE_RGN=0`），回放由软件 stamp
 - 板端 **reboot** 清 MPP 后再 `bash run.sh`
 - 详见 [`skill/hit-replay-and-pose-rgn.md`](skill/hit-replay-and-pose-rgn.md)
 
 ### 12. 回放一直「正在生成」
 
-**原因**：离开训练页时过早 `clearReplaySession()`，post 采集断帧。
+**原因 A**：离开训练页时过早 `clearReplaySession()`，post 采集断帧。  
+**处理**：已改为仅在 `goHome()` 清除 session。
 
-**处理**：已改为仅在 `goHome()` 清除 session；确保 `hit_replay_needs_frames()` 在 post 期间继续喂帧。
+**原因 B**：第 4 次及以后回放仅保存 raw，需点进详情页触发骨骼渲染（显示「骨骼渲染中」）。  
+**处理**：等待数秒或调大 `WIDGET_REPLAY_POSE_EAGER_MAX` 预渲染更多条。
 
 ---
 

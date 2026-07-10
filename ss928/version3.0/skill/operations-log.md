@@ -164,6 +164,31 @@ sshpass -p ebaina ssh root@192.168.1.168 "cd /opt/widget_ui && rm -f main.o main
 
 ---
 
+## 11. 回放优化（2026-07-11）
+
+### 完成内容
+
+- **关闭实时 RGN 骨骼**（`WIDGET_POSE_RGN=0`），仅回放 `pose_stamp` 画骨架
+- **VPSS ch3** 960×540 专用回放通道，`WIDGET_REPLAY_FPS=20`
+- **按需骨骼渲染**：前 3 条立即导出 PPM；第 4 条起存 `raw/`，点进详情页触发 `/tmp/.widget_replay_pose_req`
+- UI：`replayHitNeedsPoseRender()`、`requestHitReplayPoseRender()`；详情页「骨骼渲染中」提示
+- PPM 导出：BT.601 limited-range；每帧保存 pose 快照供 lazy 渲染
+
+### 关键文件
+
+- `ai/sample_vio_ai.c`：`hit_replay_*`、`pose_stamp_on_replay_nv12_ex`、raw/pose 侧车
+- `src/ui_common.cpp`、`src/pages_training.cpp`
+- `scripts/run.sh`
+
+### 部署
+
+```bash
+bash scripts/build_vio_ai.sh && bash scripts/deploy_bin.sh
+bash scripts/deploy_panel.sh ui_common.cpp ui_common.h pages_training.cpp
+```
+
+---
+
 ## 10. 单人击球回放（2026-07）
 
 ### 完成内容
@@ -191,7 +216,7 @@ bash scripts/deploy_panel.sh main_window.cpp pages_training.cpp ui_pages.h
 
 ---
 
-## 11. 对打模式多拍柄（2026-07）
+## 12. 对打模式多拍柄（2026-07）
 
 - `MatchSetupPage`：扫描绑定最多 4 台九轴
 - `MatchRunningPage`：多设备布局、IMU 触发、视觉延迟更新、评分建议
@@ -201,7 +226,7 @@ bash scripts/deploy_panel.sh main_window.cpp pages_training.cpp ui_pages.h
 
 ---
 
-## 12. 源码模块化（pages 拆分）
+## 13. 源码模块化（pages 拆分）
 
 `main.cpp` 已拆为：
 
