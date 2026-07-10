@@ -1,8 +1,8 @@
 ---
 name: paibing-bs20
 description: >-
-  Develop, build, and debug BS20 paibing racket IMU firmware (SLE ASCII broadcast
-  + BLE notify). Use when editing paibing code, fixing SLE adv refresh/restart,
+  Develop, build, and debug BS20 paibing racket IMU firmware (SLE 22B binary
+  broadcast + BLE ASCII notify). Use when editing paibing code, fixing SLE adv
   building fwpkg, integrating into fbb_bs2x SDK, or MAC batch burn packages.
   For SS928 parse/dedup/hit detection use paibing-ss928 skill.
 ---
@@ -38,17 +38,18 @@ common/paibing_imu.c          # MPU9250 + Mahony + 100ms 循环
 | 阶段 | 载荷 | 状态 |
 |------|------|------|
 | 早期 | ADV 内长 ASCII | 已弃用（远距离丢包） |
-| 中期 | 22B `EB 1A 02` 二进制 | **已回退**（主控解析错位） |
-| **当前** | ASCII `@` 行，ADV+ScanRsp 双份 | **量产** |
+| 中期 | 22B `EB 1A 02` 二进制 | 7m+ 收包优先 |
+| 短暂 | ASCII `@` 行双份 | 7m+ 收包率下降 |
+| **当前** | **22B 二进制**，ADV+ScanRsp 双份 | **量产**（499a3735） |
 
-主控对接见 `bs20/docs/主控对接说明.md`；主控实现见 `ss928/` 与 [paibing-ss928](../paibing-ss928/SKILL.md)。
+主控对接见 `bs20/docs/主控对接说明-远距离二进制版.md`；主控实现见 `ss928/` 与 [paibing-ss928](../paibing-ss928/SKILL.md)。
 
 ## 星闪当前策略（勿随意改回）
 
-1. **ASCII 行**（与 BLE Notify 相同），放在 **0xFF 厂商域**
-2. **ADV + Scan Response 双份** 相同 ASCII
+1. **22B 二进制** `EB 1A 02`，放在 **0xFF 厂商域**
+2. **ADV + Scan Response 双份** 相同载荷
 3. **100ms 异步 restart**（播着时 `set_announce_data` 不刷新空口，不可省）
-4. 广播间隔 **0x28**（5ms）→ 主控会扫到重复帧，**靠主控 @uptime 去重**
+4. 广播间隔 **0x50**（10ms）→ 主控会扫到重复帧，**靠主控 uptime 去重**
 5. `sle_customize_max_pwr(8,2)` + `announce_tx_power=8`
 6. **禁止** 180ms 限流 restart（数据刷新过慢）
 
@@ -88,7 +89,7 @@ bash tools/build_paibing_ble.sh
 | 现象 | 检查 |
 |------|------|
 | 有名无数据 | 主控是否解析 ADV/ScanRsp 的 0xFF，而非只看设备名 |
-| 主控 G/R 乱数 | 主控是否误用 EB 1A 二进制解析 |
+| 主控 G/R 乱数 | 主控是否误用 ASCII sscanf 解二进制 |
 | uptime 卡死 | 是否又在播着时仅热更新而不 restart |
 | 主控日志刷屏 | 主控未按 @uptime 去重（拍柄 5ms 广播是正常现象） |
 | 功率无效 | 是否调用 `sle_customize_max_pwr` |

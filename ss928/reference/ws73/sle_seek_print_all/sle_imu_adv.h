@@ -1,12 +1,12 @@
 /*
  * 拍柄星闪广播 IMU（厂商 AD type=0xFF）
  *
- * 星闪当前固件（2026-07）：
- *   - ADV **与** Scan Response 均携带 ASCII @ 行（与 BLE Notify 相同格式）
- *   - 主控按 MAC + @uptime_ms 去重，有效采样约 10Hz
+ * 星闪量产固件（2026-07 远距离版）：
+ *   - ADV **与** Scan Response 均携带 **22 字节 EB 1A 02** 二进制帧
+ *   - 主控按 MAC + uptime_ms 去重，有效采样约 10Hz
  *
- * 旧固件回退：
- *   - 22 字节二进制 EB 1A 02（小端）
+ * 回退：
+ *   - ASCII @ 行（BLE Notify / 旧星闪 ASCII 固件）
  */
 #ifndef SLE_IMU_ADV_H
 #define SLE_IMU_ADV_H

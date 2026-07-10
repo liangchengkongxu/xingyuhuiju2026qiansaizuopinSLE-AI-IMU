@@ -581,12 +581,12 @@ static int format_imu_line_from_binary(const uint8_t *p, uint8_t vlen, char *out
         return 0;
     }
 
-    /* 厂商域内 ASCII @ 行（极少数固件） */
-    if (vlen >= 12 && p[4] == '@' && scan_buffer_for_imu_copy(p, vlen, out, out_len)) {
+    if (format_imu_sensor_adv(p, vlen, out, out_len)) {
         return 1;
     }
 
-    if (format_imu_sensor_adv(p, vlen, out, out_len)) {
+    /* 厂商域内 ASCII @ 行（BLE / 旧星闪固件） */
+    if (vlen >= 12 && p[4] == '@' && scan_buffer_for_imu_copy(p, vlen, out, out_len)) {
         return 1;
     }
 
@@ -743,13 +743,16 @@ static int adv_has_imu_payload(const uint8_t *data, uint8_t len)
 {
     char line[SLE_IMU_LINE_MAX];
 
-    if (data == NULL || len < 10) {
+    if (data == NULL || len < SLE_IMU_ADV_MIN_LEN) {
         return 0;
     }
-    if (scan_buffer_for_imu_copy(data, len, line, sizeof(line))) {
+    if (adv_has_imu_manufacturer(data, len)) {
         return 1;
     }
-    return adv_has_imu_manufacturer(data, len);
+    if (len >= 10 && scan_buffer_for_imu_copy(data, len, line, sizeof(line))) {
+        return 1;
+    }
+    return 0;
 }
 
 static void manufacturer_imu_on_field(uint8_t type, const uint8_t *val, uint8_t vlen, void *ctx)
@@ -763,7 +766,13 @@ static void manufacturer_imu_on_field(uint8_t type, const uint8_t *val, uint8_t 
     if (type != SLE_AD_MANUFACTURER || val == NULL) {
         return;
     }
-    /* 新固件：ADV / Scan Response 厂商 0xFF 内 ASCII @ 行（与 BLE Notify 一致） */
+    /* 量产固件：ADV / Scan Response 厂商 0xFF 内 22B EB 1A 02 */
+    if (vlen >= SLE_IMU_ADV_MIN_LEN && format_imu_line_from_binary(val, vlen, line, sizeof(line))) {
+        *ec->emitted = 1;
+        (void)emit_imu_line_tagged(ec->mac, line);
+        return;
+    }
+    /* BLE Notify / 旧 ASCII 星闪固件 */
     if (vlen >= 10 && val[0] == '@') {
         if (copy_imu_line_from_at((const char *)val, (size_t)vlen, line, sizeof(line))) {
             *ec->emitted = 1;
@@ -772,12 +781,6 @@ static void manufacturer_imu_on_field(uint8_t type, const uint8_t *val, uint8_t 
         return;
     }
     if (scan_buffer_for_imu_copy(val, vlen, line, sizeof(line))) {
-        *ec->emitted = 1;
-        (void)emit_imu_line_tagged(ec->mac, line);
-        return;
-    }
-    /* 旧二进制 EB 1A 02 回退 */
-    if (vlen >= SLE_IMU_ADV_MIN_LEN && format_imu_line_from_binary(val, vlen, line, sizeof(line))) {
         *ec->emitted = 1;
         (void)emit_imu_line_tagged(ec->mac, line);
         return;
@@ -876,15 +879,15 @@ static void try_emit_imu_from_adv(sle_seek_result_info_t *info, const char *name
     if (!mac_whitelist_allowed(mac)) {
         return;
     }
-    /* 1. 厂商 0xFF：ASCII @ 行（新固件 ADV + Scan Response 双份，按 uptime 去重） */
+    /* 1. 厂商 0xFF：22B EB 1A 02（量产，ADV + Scan Response 双份，uptime 去重） */
     (void)walk_adv_tlv(info->data, info->data_length, manufacturer_imu_on_field, &ctx);
-    /* 2. 整包扫描 ASCII @ 行 */
-    if (!emitted) {
-        scan_buffer_for_imu(info->data, info->data_length, &ctx);
-    }
-    /* 3. 旧二进制 EB 1A 02 回退 */
+    /* 2. 整包扫描 EB 1A（TLV 未拆出时） */
     if (!emitted) {
         (void)try_emit_binary_imu(info->data, info->data_length, &ctx);
+    }
+    /* 3. ASCII 回退（BLE Notify / 旧星闪固件） */
+    if (!emitted) {
+        scan_buffer_for_imu(info->data, info->data_length, &ctx);
     }
 }
 
@@ -1215,7 +1218,7 @@ void sle_seek_print_client_init(void)
     (void)memset_s(g_imu_dedup, sizeof(g_imu_dedup), 0, sizeof(g_imu_dedup));
     g_quiet_log = (getenv("SLE_SEEK_QUIET") != NULL);
     printf("%s 扫描打印工具（SLE TLV 解码）\n", SLE_SEEK_LOG);
-    printf("%s 说明: 厂商0xFF 内 ASCII @ 行（默认）；EB 1A 02 二进制为旧固件回退；MAC+uptime 去重\n",
+    printf("%s 说明: 厂商0xFF 内 EB 1A 02 二进制（默认）；ASCII @ 行为 BLE/旧固件回退；MAC+uptime 去重\n",
         SLE_SEEK_LOG);
     fflush(stdout);
     register_seek_callbacks();

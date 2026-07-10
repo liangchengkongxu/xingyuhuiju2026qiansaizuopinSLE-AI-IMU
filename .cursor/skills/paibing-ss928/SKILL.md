@@ -1,10 +1,11 @@
 ---
 name: paibing-ss928
 description: >-
-  Develop and debug SS928 main controller IMU pipeline: WS73 SLE scan, ASCII
-  parse, MAC+uptime dedup, swing detection, 1D CNN classify, Qt widget_panel
-  deploy. Use when editing sle_seek_print_client, sle_imu_service, imu_swing_detector,
-  deploy_ws73.sh, run.sh env vars, or fixing false hit triggers.
+  Develop and debug SS928 main controller IMU pipeline: WS73 SLE scan, EB 1A 02
+  binary parse (ASCII fallback), MAC+uptime dedup, swing detection, 1D CNN
+  classify, Qt widget_panel deploy. Use when editing sle_seek_print_client,
+  sle_imu_service, imu_swing_detector, deploy_ws73.sh, run.sh env vars, or
+  fixing false hit triggers.
 ---
 
 # SS928 主控 IMU / 训练面板 Skill
@@ -21,8 +22,8 @@ ss928/reference/ws73/        # sle_seek_print_client.c 参考快照
 ## 数据通路
 
 ```
-BS20 广播 (ASCII @ 行, 5ms 间隔, 100ms 换帧)
-  → sle_seek_print_all (解析 0xFF, MAC+uptime 去重)
+BS20 广播 (22B EB 1A 02, 10ms 间隔, 100ms 换帧)
+  → sle_seek_print_all (TLV 0xFF 二进制优先 → 转 @ 行, MAC+uptime 去重)
   → [SLE_IMU] mac=...|@...
   → sle_imu_bridge.sh → /tmp/sle_imu_lines
   → SleImuService::pollImuLog (二次去重)
@@ -30,12 +31,12 @@ BS20 广播 (ASCII @ 行, 5ms 间隔, 100ms 换帧)
   → UI hitDetected
 ```
 
-## 解析规则（当前，勿回退二进制默认）
+## 解析规则（2026-07 远距离二进制版）
 
-1. **ASCII 优先**：厂商 0xFF 内 `@uptime,A...,G...,R...,P...,M...`
+1. **二进制优先**：厂商 0xFF 内 `EB 1A 02` 22 字节 → `format_imu_sensor_adv()` 转 `@` 行
 2. **ADV + Scan Response** 均尝试 TLV 解析
-3. **去重**：同 MAC + 同 `@uptime_ms` 只输出/处理一次
-4. `EB 1A 02` 仅旧固件回退
+3. **去重**：同 MAC + 同 uptime_ms 只输出/处理一次
+4. **ASCII 回退**：BLE Notify / 旧星闪固件 `@uptime,A...,G...,R...,P...,M...`
 
 关键文件（完整工程）：
 
@@ -123,7 +124,7 @@ tail -f /tmp/widget_imu.log | grep hit
 
 | 现象 | 检查 |
 |------|------|
-| G/R 巨大乱数 | 是否误用 EB 1A 二进制解析 |
+| G/R 巨大乱数 | 是否误用 ASCII sscanf 解二进制 |
 | 同一 @ 重复多行 | 去重未生效 / 桥接未更新 |
 | uptime 卡死 | 拍柄广播未 restart |
 | 随便动就击球 | 降低灵敏度见上表 |
@@ -132,7 +133,7 @@ tail -f /tmp/widget_imu.log | grep hit
 
 ## 相关文档
 
-- 协议：[bs20/docs/主控对接说明.md](../../bs20/docs/主控对接说明.md)
+- 协议：[bs20/docs/主控对接说明-远距离二进制版.md](../../bs20/docs/主控对接说明-远距离二进制版.md)
 - 去重：[ss928/docs/IMU解析与去重实现.md](../../ss928/docs/IMU解析与去重实现.md)
 - 联调：[docs/联调快速指南.md](../../docs/联调快速指南.md)
 

@@ -1,13 +1,13 @@
 # 参考代码说明
 
-本目录为 **SS928 主控 IMU 链路** 的参考快照，与 2026-07 拍柄 ASCII 协议对齐，便于主控同事直接阅读，无需拉取完整 MPP 工程。
+本目录为 **SS928 主控 IMU 链路** 的参考快照，与 2026-07 **远距离二进制**协议对齐。
 
 ## 包含文件
 
 | 文件 | 说明 |
 |------|------|
 | `ws73/sle_imu_bridge.sh` | 后台扫描，写入 `/tmp/sle_imu_lines` |
-| `ws73/sle_seek_print_all/sle_seek_print_client.c` | 扫描解析 + ASCII 优先 + 去重 |
+| `ws73/sle_seek_print_all/sle_seek_print_client.c` | 扫描解析 + **EB 1A 优先** + 去重 |
 | `ws73/sle_seek_print_all/sle_imu_adv.h` | 协议头定义 |
 
 ## 不包含

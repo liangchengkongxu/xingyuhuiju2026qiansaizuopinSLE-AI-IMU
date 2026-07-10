@@ -13,12 +13,12 @@ description: >-
 
 | 端 | 芯片 | 目录 | 职责 |
 |----|------|------|------|
-| 拍柄 | BS20-N1200 | `bs20/` | MPU9250、星闪 ASCII 广播 |
+| 拍柄 | BS20-N1200 | `bs20/` | MPU9250、星闪 22B 二进制广播 |
 | 主控 | SS928 + WS73 | `ss928/` + 内部 `version3.0/` | 扫描解析、挥拍/CNN、Qt UI |
 
-**当前协议（2026-07）**：星闪 **ASCII `@` 行**，ADV+ScanRsp 双份 0xFF，主控 **MAC+uptime 去重**，有效 **10Hz**。
+**当前协议（2026-07）**：星闪 **22B `EB 1A 02`**，ADV+ScanRsp 双份 0xFF，主控 **MAC+uptime 去重**，有效 **10Hz**。
 
-> 已废弃：默认按 `EB 1A 02` 二进制解析。
+> BLE Notify 仍为 ASCII `@` 行。
 
 ## 子 Skill 分工
 
@@ -39,11 +39,12 @@ description: >-
 
 ### 阶段 3：协议试错与定型
 - 试过 ADV 长 ASCII → 远距离丢包
-- 试过 22B `EB 1A 02` 二进制 → 主控解析错位、G/R 异常
-- **定型**：ASCII 行（与 BLE 同格式），ADV+ScanRsp 双份，100ms 异步 restart 刷新
+- 22B `EB 1A 02` 二进制 → 7m+ 收包好
+- 短暂回 ASCII → 7m+ 收包率下降
+- **当前（499a3735）**：再改回 **22B 二进制**，主控二进制优先解析
 
 ### 阶段 4：主控星闪接收
-- `sle_seek_print_all`：TLV 解 0xFF，ASCII 优先
+- `sle_seek_print_all`：TLV 解 0xFF，**EB 1A 优先**，转 `@` 行
 - `sle_imu_bridge.sh` → `/tmp/sle_imu_lines`
 - **MAC + @uptime_ms 去重**（C 层 + Qt 双层）
 
