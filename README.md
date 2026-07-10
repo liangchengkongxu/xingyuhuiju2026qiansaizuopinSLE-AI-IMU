@@ -174,7 +174,7 @@ bash tools/build_paibing_sle.sh 02   # MAC 末字节 02
 
 ### 2. 主控端 SS928
 
-完整 Qt 工程在队伍内部 SDK 工作区（`version3.0/`）；本仓 [`ss928/reference/`](ss928/reference/) 提供与量产对齐的参考代码与文档。
+完整 Qt 工程已纳入本仓 [`ss928/version3.0/`](ss928/version3.0/)（源码，不含 NPU `.om` 与板端二进制）；[`ss928/reference/`](ss928/reference/) 仍保留星闪解析参考快照。
 
 #### 2.1 星闪 IMU 接收链
 
@@ -202,13 +202,13 @@ WS73 sle_seek_print_all
 
 ```bash
 # 星闪解析工具（改 C 后执行）
-bash version3.0/scripts/deploy_ws73.sh
+bash ss928/version3.0/scripts/deploy_ws73.sh
 
 # Qt 面板增量编译（改 cpp 后执行）
-bash version3.0/scripts/deploy_panel.sh sle_imu_service.cpp imu_swing_detector.cpp
+bash ss928/version3.0/scripts/deploy_panel.sh sle_imu_service.cpp imu_swing_detector.cpp
 
-# 板端启动
-ssh root@192.168.1.168 'cd /opt/widget_ui && ./run.sh'
+# AI 进程（Pose / 回放改 sample_vio_ai.c 后）
+bash ss928/version3.0/scripts/deploy_bin.sh
 ```
 
 → 详细说明：[ss928/docs/部署与运行.md](ss928/docs/部署与运行.md)
@@ -405,6 +405,7 @@ tail -f /tmp/widget_imu.log | grep hit   # hit(cnn) / hit(rule)
 | **6. 端侧智能** | — | 1D CNN 六类 + 规则 FSM + `both` |
 | **7. 训练 UI** | MAC 01～06 批量烧录 | 单人/班级/对打、YOLO 融合 |
 | **8. 工程化** | GitHub 文档化、Skill | 参考代码入 `ss928/reference/` |
+| **9. Pose + 回放** | — | RGN 骨骼、960×540 击球回放、ch0 抢帧踩坑修复 |
 
 ### 协议选型结论
 
@@ -473,6 +474,7 @@ cd /opt/widget_ui && ./run.sh
 │   ├── integration/                   # SDK overlay 集成
 │   └── docs/                          # 主控对接说明、固件变更记录
 └── ss928/                             # SS928 主控
+    ├── version3.0/                    # ★ 完整 Qt + AI 工程源码
     ├── docs/                          # 部署、解析、待办清单
     └── reference/ws73/                # sle_seek_print_client.c 参考快照
 ```
@@ -496,7 +498,7 @@ cd /opt/widget_ui && ./run.sh
 | 组件 | 依赖 | 说明 |
 |------|------|------|
 | **BS20 拍柄** | [HiSilicon fbb_bs2x SDK](https://gitee.com/HiSpark/fbb_bs2x) | 需自行下载，按 `bs20/integration/` 集成 |
-| **SS928 主控** | SS928V100 MPP SDK + Qt5 + WS73 原厂 SDK | 完整面板工程队伍内部维护；本仓提供文档 + `reference/` |
+| **SS928 主控** | SS928V100 MPP SDK + Qt5 + WS73 原厂 SDK | 完整工程见本仓 `ss928/version3.0/`；NPU 模型随板端 `/opt/widget_ui/models/` 部署 |
 | **NPU 模型** | `badminton_npu.om` | 随完整工程部署至 `/opt/widget_ui/models/` |
 
 - 应用层新增代码 Copyright (c) 2026 **星羽汇聚参赛队**

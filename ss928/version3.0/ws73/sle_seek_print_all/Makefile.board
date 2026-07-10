@@ -1,0 +1,31 @@
+# 在 SS928 板子上本地 gcc 编译（配合 deploy_board.sh 部署的 include/lib）
+CC      = gcc
+TARGET  = sle_seek_print_all
+SRCS    = sle_seek_print_main.c sle_seek_print_client.c
+WS73_INC ?= .
+LIBDIR   ?= ./lib
+
+CFLAGS  += -Wall -O2 -fPIC
+CFLAGS  += -I. -I$(WS73_INC)/include/bsle/common -I$(WS73_INC)/include/bsle/sle
+CFLAGS  += -I$(WS73_INC)/driver/platform/libc_sec/include
+CFLAGS  += -I$(WS73_INC)/driver/platform/drv/include
+CFLAGS  += -I$(WS73_INC)/driver/platform/osal/include
+LDFLAGS += -lm -lpthread -lrt -ldl -Wl,--gc-sections
+
+OBJS = $(SRCS:.c=.o)
+
+all: $(TARGET)
+
+$(TARGET): $(OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ -Xlinker "-(" $(LIBDIR)/libsle_host.a -Xlinker "-)"
+
+%.o: %.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+clean:
+	rm -f $(TARGET) $(OBJS)
+
+install:
+	mkdir -p /opt/widget_ui/ws73
+	cp -f $(TARGET) /opt/widget_ui/ws73/sle_seek_print_all
+	chmod +x /opt/widget_ui/ws73/sle_seek_print_all

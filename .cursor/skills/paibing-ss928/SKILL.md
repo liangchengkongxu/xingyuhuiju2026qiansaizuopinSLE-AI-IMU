@@ -13,11 +13,13 @@ description: >-
 ## 仓库布局（本 GitHub 仓）
 
 ```
+ss928/version3.0/            # ★ 完整 Qt + AI 工程源码（无 .om 大模型）
 ss928/docs/                  # 对接、部署、去重说明
 ss928/reference/ws73/        # sle_seek_print_client.c 参考快照
+ss928/version3.0/skill/      # Pose、回放、部署踩坑（Agent 文档）
 ```
 
-完整 Qt 工程在队伍内部 SDK 工作区 `version3.0/`（未整包入 Git）。
+路径前缀：本仓内一律 `ss928/version3.0/`；若在外部 SS928 SDK 工作区则为 `version3.0/`。
 
 ## 数据通路
 
@@ -50,6 +52,8 @@ BS20 广播 (22B EB 1A 02, 10ms 间隔, 100ms 换帧)
 | `scripts/run.sh` | 环境变量默认值 |
 | `scripts/deploy_ws73.sh` | 部署星闪工具 |
 | `scripts/deploy_panel.sh` | 增量编译 Qt |
+| `scripts/deploy_bin.sh` | 部署 sample_vio_ai / vo_gfbg_init |
+| `ai/sample_vio_ai.c` | YOLO + Pose RGN + 击球回放 |
 
 本仓参考副本：`ss928/reference/ws73/`
 
@@ -98,10 +102,13 @@ BS20 广播 (22B EB 1A 02, 10ms 间隔, 100ms 换帧)
 
 ```bash
 # 仅星闪解析
-bash version3.0/scripts/deploy_ws73.sh
+bash ss928/version3.0/scripts/deploy_ws73.sh
 
 # 仅 Qt（指定 cpp）
-bash version3.0/scripts/deploy_panel.sh sle_imu_service.cpp imu_swing_detector.cpp
+bash ss928/version3.0/scripts/deploy_panel.sh sle_imu_service.cpp imu_swing_detector.cpp
+
+# Pose / 回放（改 sample_vio_ai.c 后）
+bash ss928/version3.0/scripts/deploy_bin.sh
 
 # 重启
 ssh root@192.168.1.168 "/opt/widget_ui/ws73/sle_imu_bridge.sh stop; \
@@ -130,6 +137,18 @@ tail -f /tmp/widget_imu.log | grep hit
 | 随便动就击球 | 降低灵敏度见上表 |
 | 扫不到设备 | WS73 ko、WiFi 共存、`WIDGET_WS73_BSLE_MAX_COEX` |
 | CNN 不工作 | `badminton_npu.om`、AICPU 软链、`WIDGET_IMU_CNN_DISABLE` |
+
+## Pose 骨骼 + 击球回放（2026-07）
+
+| 模块 | 文件 | 要点 |
+|------|------|------|
+| Pose RGN | `ai/sample_vio_ai.c` | ch2 640 推理 → RGN 叠加 ch0 4K 预览 |
+| 回放采集 | 同上 | ch1 640 源 → 960×540 PPM + 软件画骨骼 |
+| UI | `pages_training.cpp`, `ui_common.cpp` | 轮询 `done.flag`；勿过早 `clearReplaySession` |
+
+**必须**：`WIDGET_REPLAY_VPSS_CHN=-1`（禁止从 ch0 抢帧，否则骨骼消失、进程不稳定）。
+
+详细：[`ss928/version3.0/skill/hit-replay-and-pose-rgn.md`](../../ss928/version3.0/skill/hit-replay-and-pose-rgn.md)
 
 ## 相关文档
 

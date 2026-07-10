@@ -1,0 +1,20 @@
+[Unit]
+Description=WS73 WiFi STA (insmod only, no driver reload)
+After=rc-local.service local-fs.target
+Conflicts=
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+Environment=WIDGET_WIFI_ENABLE=1
+Environment=WIDGET_WIFI_BOOT_FAST=1
+Environment=WIDGET_WIFI_DHCP_TRIES=3
+Environment=WIDGET_WIFI_WATCH_SEC=60
+# 只等 S92wifi + 修 wpa，不 insmod（避免与 rc.local 重复加载 30801）
+ExecStart=/bin/sh -c '/opt/widget_ui/ws73/wifi_sta_bridge.sh start || true'
+StandardOutput=append:/tmp/wifi_sta_bridge.log
+StandardError=append:/tmp/wifi_sta_bridge.log
+
+[Install]
+WantedBy=multi-user.target

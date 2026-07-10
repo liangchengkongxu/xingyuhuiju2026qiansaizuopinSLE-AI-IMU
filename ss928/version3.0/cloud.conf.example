@@ -1,0 +1,5 @@
+# 复制为 /opt/widget_ui/cloud.conf 并修改
+enabled=1
+base_url=http://47.107.120.9/api/v1
+device_id=xingyu-ss928-01
+user_phone=18340326998
