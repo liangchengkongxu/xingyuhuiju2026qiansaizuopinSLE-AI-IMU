@@ -1,0 +1,37 @@
+[Unit]
+Description=SS928 Widget Panel (Qt GFBG + camera + AI)
+# 与 WiFi 并行启动，不等 widget_wifi（WiFi DHCP 可慢 30–40s，面板无需等待）
+After=local-fs.target rc-local.service
+Before=multi-user.target
+Conflicts=kiosk.service ui-server.service
+DefaultDependencies=yes
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/widget_ui
+Environment=HOME=/root
+Environment=WIDGET_BOOT_FAST=1
+Environment=WIDGET_PANEL_SKIP_BUILD=1
+Environment=WIDGET_CAM_ISP_CLEAN=0
+Environment=WIDGET_WS73_BOOT_PREP=1
+Environment=WIDGET_WIFI_ENABLE=1
+Environment=WIDGET_WIFI_BOOT_FAST=1
+Environment=WIDGET_WS73_KEEP_WIFI=1
+Environment=WIDGET_AI_ATTACH_DELAY_SEC=2
+ExecStartPre=-/bin/systemctl stop kiosk.service
+ExecStartPre=-/bin/systemctl stop ui-server.service
+ExecStartPre=-/bin/sh -c 'killall weston MiniBrowser vo_gfbg_init widget_panel sample_vio_ai sample_yolov8_os08a20 2>/dev/null || true'
+# 轮询 fb0（250ms 间隔，最多 10s），比固定 sleep 10 更快
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 40); do test -c /dev/fb0 && exit 0; sleep 0.25; done; exit 0'
+ExecStart=/bin/bash /opt/widget_ui/run.sh
+StandardOutput=append:/tmp/widget_ui_boot.log
+StandardError=append:/tmp/widget_ui_boot.log
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=300
+KillMode=mixed
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=rc-local.service multi-user.target

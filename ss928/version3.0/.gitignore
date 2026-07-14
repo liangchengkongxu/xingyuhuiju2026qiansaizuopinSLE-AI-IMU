@@ -1,0 +1,31 @@
+# 交叉编译出的可执行文件与中间目录
+bin/vo_gfbg_init
+bin/sample_firmware_vio
+bin/sample_vio_ai
+bin/obj_vo_gfbg/
+bin/obj_sample_firmware_vio/
+bin/*.o
+
+# 训练/部署大包（体积大，勿提交）
+deploy_pack_v2/
+deploy_pack_cls/**/*.onnx
+deploy_pack_cls/**/*.om
+deploy_pack_cls/**/*.wk
+
+# 教学视频（板端用 prepare_tutorials + deploy 同步）
+tutorials/*.mp4
+
+# IMU CNN 编译中间文件
+lib/obj_imu_cnn/
+
+# AI 模型（体积大，勿提交；用 deploy_models.sh 部署到板端）
+models/*
+!models/README.md
+!models/.gitkeep
+
+# 常见模型后缀
+*.om
+*.wk
+*.bin
+*.onnx
+*.rknn

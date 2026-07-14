@@ -1,0 +1,30 @@
+CC      = gcc
+TARGET  = sle_announce_cmd
+SRCS    = sle_announce_cmd_main.c sle_announce_cmd_client.c
+WS73_INC ?= .
+LIBDIR   ?= ./lib
+
+CFLAGS  += -Wall -O2 -fPIC
+CFLAGS  += -I. -I$(WS73_INC)/include/bsle/common -I$(WS73_INC)/include/bsle/sle
+CFLAGS  += -I$(WS73_INC)/driver/platform/libc_sec/include
+CFLAGS  += -I$(WS73_INC)/driver/platform/drv/include
+CFLAGS  += -I$(WS73_INC)/driver/platform/osal/include
+LDFLAGS += -lm -lpthread -lrt -ldl -Wl,--gc-sections
+
+OBJS = $(SRCS:.c=.o)
+
+all: $(TARGET)
+
+$(TARGET): $(OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ -Xlinker "-(" $(LIBDIR)/libsle_host.a -Xlinker "-)"
+
+%.o: %.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+clean:
+	rm -f $(TARGET) $(OBJS)
+
+install:
+	mkdir -p /opt/widget_ui/ws73
+	cp -f $(TARGET) /opt/widget_ui/ws73/sle_announce_cmd
+	chmod +x /opt/widget_ui/ws73/sle_announce_cmd

@@ -17,3 +17,28 @@ backend/seed_assets/releases/
 # IDE and local handoff archives
 .idea/
 *.zip
+
+# 构建产物
+**/output/
+**/__pycache__/
+*.o
+*.elf
+*.map
+*.bin
+*.fwpkg
+*.zip
+
+# IDE / 系统
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 本地 SDK 符号链接（BLE 预编译）
+**/standard-bs20-n1200-ble
+
+# 密钥（切勿提交）
+*.pem
+id_*
+*.key

@@ -1,0 +1,6 @@
+# class_id class_name
+0 fangwang
+1 gaoyuan
+2 pingchou
+3 shaqiu
+4 tiaoqiu

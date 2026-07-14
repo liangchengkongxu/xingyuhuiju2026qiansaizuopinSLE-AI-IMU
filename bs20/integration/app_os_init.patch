@@ -1,0 +1,15 @@
+diff --git a/src/drivers/chips/bs2x/main_init/app_os_init.c b/src/drivers/chips/bs2x/main_init/app_os_init.c
+index 0c3313a..3b7ebc6 100644
+--- a/src/drivers/chips/bs2x/main_init/app_os_init.c
++++ b/src/drivers/chips/bs2x/main_init/app_os_init.c
+@@ -100,8 +100,8 @@
+ #define BTH_HADM_SERVICE_STACK_SIZE         0x1100
+ #endif
+ #else
+-/* 线程栈分配，推荐比水线高30%  */
+-#define APP_STACK_SIZE                      0xA00
++/* 线程栈分配，推荐比水线高30%（IMU+BLE+星闪+浮点姿态需更大栈） */
++#define APP_STACK_SIZE                      0x1000
+ #ifndef CONFIG_CODE_MINIATURE_ENABLE
+ #define LOG_STACK_SIZE                      0x600
+ #define AT_STACK_SIZE                       0xC00
