@@ -1,0 +1,25 @@
+services:
+  api:
+    build: .
+    container_name: xingyu-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - SECRET_KEY=xingyu-prod-change-me
+      - DATABASE_URL=sqlite+aiosqlite:///./data/xingyu.db
+      - UPLOAD_DIR=./data/uploads
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: xingyu-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./data/uploads:/app/uploads:ro
+    depends_on:
+      - api

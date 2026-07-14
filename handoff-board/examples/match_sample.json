@@ -1,0 +1,44 @@
+{
+  "device_id": "xingyu-hi3403-01",
+  "user_phone": "13800138000",
+  "title": "板端联调-对打测试",
+  "duration_min": 35,
+  "opponent_label": "俱乐部搭档",
+  "strokes": [
+    {
+      "action_type": "杀球",
+      "score": 94,
+      "ai_suggestion": "击球点再靠前，拍面稍压",
+      "ball_speed_kmh": 312,
+      "power_n": 78
+    },
+    {
+      "action_type": "平抽",
+      "score": 88,
+      "ai_suggestion": "手腕更放松，减少多余动作",
+      "ball_speed_kmh": 186,
+      "power_n": 52
+    },
+    {
+      "action_type": "高远",
+      "score": 91,
+      "ai_suggestion": "蹬转发力连贯，落点到位",
+      "ball_speed_kmh": 168,
+      "power_n": 45
+    },
+    {
+      "action_type": "放网",
+      "score": 86,
+      "ai_suggestion": "搓球再贴网一些",
+      "ball_speed_kmh": 42,
+      "power_n": 18
+    },
+    {
+      "action_type": "杀球",
+      "score": 96,
+      "ai_suggestion": "完美一拍！速度与落点俱佳",
+      "ball_speed_kmh": 328,
+      "power_n": 82
+    }
+  ]
+}

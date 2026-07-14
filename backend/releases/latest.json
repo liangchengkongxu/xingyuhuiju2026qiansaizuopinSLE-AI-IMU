@@ -1,0 +1,7 @@
+{
+  "versionCode": 11,
+  "versionName": "0.11",
+  "apkUrl": "/uploads/releases/xingyu-v0.11-debug.apk",
+  "changelog": "新增线上 OTA 更新；使用帮助；修复评论数显示；优化我的页面",
+  "forceUpdate": false
+}
