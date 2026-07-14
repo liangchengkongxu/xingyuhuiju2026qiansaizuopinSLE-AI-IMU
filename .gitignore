@@ -1,0 +1,19 @@
+.deploy/
+*.local
+.env
+credentials*
+
+# Android / Gradle generated files
+HelloKotlin/.gradle/
+HelloKotlin/build/
+HelloKotlin/app/build/
+HelloKotlin/local.properties
+*.apk
+
+# Backend runtime data and release artifacts
+backend/data/
+backend/seed_assets/releases/
+
+# IDE and local handoff archives
+.idea/
+*.zip
