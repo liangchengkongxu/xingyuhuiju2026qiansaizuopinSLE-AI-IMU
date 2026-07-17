@@ -1,0 +1,287 @@
+================================================================================
+  星羽汇聚 · BS20 拍柄端 技术文档（答辩用）
+  作品：基于 SS928 与端侧视觉 AI 的多模态星闪 SLE 羽毛球智能训练系统
+  芯片：海思 BS20-N1200 + MPU-9250
+  日期：2026-07
+================================================================================
+
+一、在整体系统中的定位
+--------------------------------------------------------------------------------
+
+本作品分感知层 / 传输层 / 边缘计算层 / 交互层。
+
+BS20 拍柄端处于「感知层 + 传输层」：
+  - 感知：MPU-9250 九轴采集 + 板端姿态解算
+  - 传输：星闪 SLE 非连接扫播，把数据发给 SS928 主控
+
+设计目标：
+  1. 支持班级多人训练场景下 20+（设计目标可扩展至 40+）拍柄同时上报
+  2. 不占用星闪连接数（非连接广播，主控只扫不连）
+  3. IMU 采样 100 Hz 量级上报（主循环 100 ms，有效业务帧约 10 Hz）
+  4. 与 SS928 端侧 AI / 纯 IMU 解算解耦，拍柄只负责「采准、算姿态、发得出」
+
+
+二、项目架构
+--------------------------------------------------------------------------------
+
+2.1 软件分层
+
+  ┌─────────────────────────────────────────────────────────┐
+  │  app_main()（sle/ 或 ble/）                               │
+  │    覆盖 SDK weak 符号，选择无线传输实现                     │
+  └───────────────────────┬─────────────────────────────────┘
+                          │ paibing_transport_t
+                          │   .init / .push_sensor
+  ┌───────────────────────▼─────────────────────────────────┐
+  │  common/paibing_imu.c                                    │
+  │    板级初始化 · MPU9250 · 校准 · Mahony · 100ms 主循环    │
+  └───────────────────────┬─────────────────────────────────┘
+                          │
+          ┌───────────────┴───────────────┐
+          ▼                               ▼
+   sle/（量产默认）                   ble/（调试备用）
+   非连接扫播 ASCII                   连接后 GATT Notify
+   ADV + ScanRsp 双份                 ASCII 行（格式相同）
+
+
+2.2 目录职责
+
+  common/
+    paibing_imu.c / .h      MPU9250 驱动、校准、AHRS、主循环
+    paibing_transport.h     传输抽象接口（解耦 IMU 与无线）
+    main.c / startup.S      芯片入口
+
+  sle/
+    paibing_app.c           星闪版入口，注册 transport
+    paibing_sle_server.c    SLE 服务注册、发射功率 customize
+    paibing_sle_server_adv.c 广播参数、组包、空口刷新（核心）
+    mac_config.h            MAC、扫播开关、设备号
+
+  ble/
+    paibing_app.c           蓝牙版入口
+    paibing_ble_uart.c      连接 Notify
+    （备选）paibing_ble_sensor_adv.c  BLE 传感器广播
+
+  编译 Target：
+    standard-bs20-n1200      → 星闪量产
+    standard-bs20-n1200-ble  → 蓝牙调试
+
+
+2.3 关键设计：传输抽象
+
+  typedef struct {
+      void (*init)(void);
+      void (*push_sensor)(uptime, ax, ay, az, gx, gy, roll, pitch, mag);
+  } paibing_transport_t;
+
+  意义：
+  - 一套 IMU 采样与姿态解算，两路无线（SLE / BLE）共用
+  - 答辩可强调：模块解耦、可替换、便于联调与量产切换
+
+
+2.4 硬件引脚
+
+  UART0 调试      TX=MGPIO19  RX=MGPIO20   115200 8N1
+  MPU9250 软件I2C SCL=MGPIO16 SDA=MGPIO15  （GPIO 位模拟，不用硬件 I2C）
+  软复位按键      MGPIO22 低电平有效
+
+
+三、技术实现
+--------------------------------------------------------------------------------
+
+3.1 IMU 采集与姿态解算（common/paibing_imu.c）
+
+  （1）软件 I2C
+      - 用 GPIO 模拟时序，避免硬件 I2C 复用/总线冲突问题
+      - 自动探测器件地址 0x68 / 0x69（AD0）
+      - WHO_AM_I 校验（MPU9250 期望 0x71）
+
+  （2）上电陀螺零偏校准
+      - 上电后静止采样：20 次 × 50 ms ≈ 1 s
+      - 校准完成前不向外推业务帧
+      - 校准后减零偏，抑制姿态漂移
+
+  （3）数据处理链路（每 100 ms）
+      读加速度/陀螺 → 低通滤波（alpha=0.3）
+      → Mahony AHRS 更新四元数
+      → 欧拉角 roll / pitch
+      → 力度 magnitude（加速度模长，单位 g）
+      → transport->push_sensor(...)
+
+  （4）主循环其它要点
+      - 周期性 uapi_watchdog_kick() 喂狗
+      - 串口降频打印（约 500 ms 一行），避免 UART 与射频抢资源
+      - 复位键消抖后 hal_reboot_chip()
+
+
+3.2 星闪非连接扫播（量产路径，答辩重点）
+
+  （1）为什么用非连接广播，而不是连接 Notify？
+
+      连接模式问题：
+        - 连接数有限，班级 20+ 拍柄无法同时连上
+        - 易断链、send busy，丢包与延迟不可控
+
+      非连接扫播优势：
+        - 主控只扫描、不建连，不占连接资源
+        - 多拍柄并行「说话」，契合多人训练场景
+        - 符合星闪 SLE 高并发定位
+
+  （2）广播模式与标识
+
+      announce_mode = SLE_ANNOUNCE_MODE_NONCONN_SCANABLE
+      设备名        = "paibing_imu"
+      MAC 前缀      = cc:ad:c9:00:22:xx（末字节 01～08 区分拍柄）
+      载荷位置      = Manufacturer Specific Data（AD type 0xFF）
+      ADV + Scan Response 各放一份相同数据（远距离「有名无数据」的对策）
+
+  （3）当前载荷格式：ASCII 行（与 BLE Notify 一致）
+
+      示例：
+      @10222,A-46,+32,+77,G-119,-248,R+169,P-244,M96\n
+
+      字段含义：
+        @uptime     开机相对时间（ms）
+        A ax,ay,az  加速度，数值×10 = mg
+        G gx,gy     陀螺，单位 dps
+        R / P       roll / pitch，数值÷10 = 度
+        M           力度，数值÷100 = g
+
+      设计取舍：
+        - ASCII 便于主控解析与联调
+        - 曾试验 22B 二进制缩短空口时间，但若同时把广播间隔从 5ms
+          放宽到 10ms，发包密度下降，实测丢包反而变差
+        - 结论：当前量产以「高发包密度 + ASCII」为准
+
+  （4）广播间隔与功率
+
+      广播间隔：0x28（125 us 单位）≈ 5 ms
+        → 同一 IMU 帧在空口会被扫到多次，主控需按 @uptime 去重
+        → 提高主控扫描窗口内「扫到包」的概率
+
+      发射功率：
+        sle_customize_max_pwr(8, 2)   // GFSK 约 8 dBm 量级
+        announce_tx_power = 8
+        说明：API 参数上限可达 20 dBm，但 BS20 芯片实际约 6～8 dBm
+              必须调用 customize，否则可能被钳在默认较低功率
+
+  （5）空口刷新机制（核心难点）
+
+      问题：播着时只调 sle_set_announce_data()（热更新），
+            空口数据可能不刷新，uptime 卡在首帧。
+
+      当前方案：每 100 ms 同步 restart
+        1. 在 RAM 中组 ADV / ScanRsp 缓冲（stage）
+        2. sle_stop_announce()
+        3. 等待 disable 回调（最长约 40 ms）
+        4. sle_set_announce_data() + sle_start_announce()
+
+      状态机示意：
+        push_sensor(100ms)
+          → stage_announce_buffers
+          → stop_announce
+          → 等 g_adv_active=false
+          → commit + start_announce
+
+      踩坑记录（答辩可答「遇到过什么问题」）：
+        - 同步 stop 后立刻 start → 0x8000600a 状态错误
+        - 180 ms 限流 restart → 破坏 10 Hz，同一帧重复过久
+        - 仅 ADV 带数据、ScanRsp 只有名字 → 远距离有名无数据
+        - 误烧 fota.fwpkg → BurnTool 超时（必须烧 *_all.fwpkg）
+
+
+3.3 蓝牙调试路径（备选）
+
+  - Target：standard-bs20-n1200-ble
+  - 可连接广播，连接后 GATT Notify 推送同一套 ASCII 行
+  - 用途：单拍柄近距离联调、不依赖星闪扫描栈时的验证
+  - 量产多人场景仍以星闪扫播为准
+
+
+3.4 工程化与部署
+
+  批量 MAC：
+    tools/build_paibing_sle.sh 01 … 08
+    → 改 mac_config.h 末字节
+    → 输出 paibing_sle_macXX_all.fwpkg
+
+  烧录注意：
+    必须用 BurnTool 烧 *_all.fwpkg（整包）
+    禁止烧 output/.../fota.fwpkg（OTA 格式会超时失败）
+
+  SDK 集成：
+    方案 C —— 应用源码 + sdk_overlay（CMakeLists / config.py / menuconfig）
+    不整仓拷贝 SDK，便于版本管理与开源展示
+
+
+四、关键指标（BS20 侧）
+--------------------------------------------------------------------------------
+
+  传感芯片          MPU-9250（加速度 ±2g，陀螺 ±250 dps 配置）
+  采样/上报周期     100 ms（约 10 Hz 有效业务帧）
+  广播间隔          约 5 ms（提高扫到概率）
+  发射功率          约 6～8 dBm（芯片实际上限）
+  设备名            paibing_imu
+  MAC               cc:ad:c9:00:22:01 ～ :08
+  并发能力          非连接扫播，不占连接数，适配 20+ 拍柄
+  5 m 量级收包      联调约 80% 正确率（与主控扫描占空比强相关）
+
+
+五、与 SS928 的协作边界（口述即可，不展开对接细节）
+--------------------------------------------------------------------------------
+
+  拍柄负责：采准、算姿态、稳定发出
+  主控负责：扫描识别、去重、单人多模态融合 / 多人纯 IMU 分类
+
+  主控侧要点（一句话）：
+    识别设备名或 MAC 前缀 → 从 ADV/ScanRsp 的 0xFF 取 ASCII 行
+    → 按 @uptime + MAC 去重 → 业务层约 10 Hz 新样本
+
+
+六、答辩可强调的设计点（建议口述顺序）
+--------------------------------------------------------------------------------
+
+  1. 场景驱动：班级多人需要「高并发、不建连」→ 选星闪非连接扫播
+  2. 架构解耦：IMU 与无线用 transport 接口分离 → 一套采样两路无线
+  3. 协议栈适配：发现热更新不刷新空口 → 设计 stage + stop/start 刷新状态机
+  4. 可靠性工程：ADV+ScanRsp 双份、5 ms 间隔、功率 customize、MAC 批量烧录
+  5. 取舍透明：试过二进制缩短包长，实测发包密度更关键 → 回退并固化当前策略
+
+
+七、可能被问到的问题（简答提纲）
+--------------------------------------------------------------------------------
+
+  Q：为什么不用蓝牙连接？
+  A：连接数不够支撑班级 20+；断链与 send busy 影响训练连续性。
+
+  Q：为什么板端也做姿态解算，不只发原始加速度？
+  A：减轻主控负担；多模态融合需要 roll/pitch；板端 Mahony 可降低传输语义复杂度。
+
+  Q：为什么每 100 ms 还要 stop/start 广播？
+  A：协议栈在「正在广播」时改 announce_data 往往不进空口；必须重启广播换帧。
+
+  Q：主控为什么会看到同一帧很多次？
+  A：广播间隔 5 ms，业务帧 100 ms 更新一次；同一 @uptime 重复是正常现象，需去重。
+
+  Q：功率设 20 dBm 为什么没用？
+  A：那是 API 参数上限；BS20 实际约 6～8 dBm，且必须 sle_customize_max_pwr。
+
+  Q：烧录为什么失败/超时？
+  A：误用了 fota.fwpkg；必须烧 macXX_all.fwpkg 整包。
+
+
+八、源码索引（快速定位）
+--------------------------------------------------------------------------------
+
+  主循环与 IMU     src/application/bs20/paibing/common/paibing_imu.c
+  传输抽象         src/application/bs20/paibing/common/paibing_transport.h
+  星闪入口         src/application/bs20/paibing/sle/paibing_app.c
+  广播核心         src/application/bs20/paibing/sle/paibing_sle_server_adv.c
+  功率配置         src/application/bs20/paibing/sle/paibing_sle_server.c
+  MAC/开关         src/application/bs20/paibing/sle/mac_config.h
+  批量编译         tools/build_paibing_sle.sh
+
+
+================================================================================
+  文档结束 · 星羽汇聚 · BS20 拍柄端
+================================================================================
