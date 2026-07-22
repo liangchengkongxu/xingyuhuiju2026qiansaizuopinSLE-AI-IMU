@@ -18,9 +18,6 @@ constexpr int kRadioPrepMarginMs = 5000;
 constexpr int kEarlyFinishStableMs = 1200;
 constexpr int kEarlyFinishMinElapsedMs = 6500;
 
-static QMap<QString, int> g_macDeviceIds;
-static int g_nextDeviceId = 2;
-
 QString resolveSeekBridgeScript()
 {
     const QString appDir = QCoreApplication::applicationDirPath();
@@ -84,17 +81,13 @@ int sleAssignDeviceId(const QString &macNormalized)
         return 0;
     if (!macAllowedByWhitelist(mac))
         return 0;
-    if (mac == QStringLiteral("CC:AD:C9:00:22:01"))
-        return 1;
-    if (mac == QStringLiteral("CC:AD:C9:00:22:02"))
-        return 2;
-    if (g_macDeviceIds.contains(mac))
-        return g_macDeviceIds.value(mac);
-    const int id = g_nextDeviceId++;
-    if (g_nextDeviceId > 99)
-        g_nextDeviceId = 2;
-    g_macDeviceIds.insert(mac, id);
-    return id;
+    /* 设备号 = 星闪 MAC 最后一位十六进制数字（如 …:01→1，…:0A→10），不再自行递增编号 */
+    const QString hex = macCompactUpper(mac);
+    if (hex.isEmpty())
+        return 0;
+    bool ok = false;
+    const int n = QString(hex.right(1)).toInt(&ok, 16);
+    return (ok && n > 0) ? n : 0;
 }
 
 SleSeekService::SleSeekService(QObject *parent)
@@ -195,8 +188,6 @@ void SleSeekService::startScan(int durationMs)
     }
 
     m_devices.clear();
-    g_macDeviceIds.clear();
-    g_nextDeviceId = 2;
     m_logOffset = 0;
     m_scanning = true;
     m_scanStartMs = QDateTime::currentMSecsSinceEpoch();

@@ -354,6 +354,16 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent), m_screenCard(nullptr)
         switchPage(9);
     });
 
+    connect(m_matchReport, &MatchReportPage::actionClicked, this,
+            [this](int hitIdx, int score, const QString &playerName, const QString &actionType, int speedKmh,
+                   int powerTen, int durationMs) {
+                const QString label = playerName.isEmpty() ? QStringLiteral("比赛击球") : playerName;
+                const QString type = actionType.trimmed().isEmpty() ? QStringLiteral("挥拍") : actionType.trimmed();
+                m_actionDetail->showAction(hitIdx, score, label, speedKmh, powerTen,
+                                           m_matchReport->replaySessionId(), durationMs, type, 9);
+                switchPage(6);
+            });
+
     // 多人 -> 班级训练（设置分组页暂不开放）
     connect(m_multi, &MultiPage::openClassTrainNoGroup, this, [this]() {
         beginClassTrainFromMulti(m_multi->m_deviceCodes, m_multi->seekDevices());

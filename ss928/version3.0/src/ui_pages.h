@@ -374,7 +374,7 @@ public:
     ActionDetailPage(MainWindow *mw, QWidget *parent = nullptr);
     void showAction(int idx, int score, const QString &skillLabel, int speedKmh = -1, int powerTen = -1,
                     const QString &replaySessionId = QString(), int durationMs = -1,
-                    const QString &hitType = QString());
+                    const QString &hitType = QString(), int backPage = 5);
     QLabel *m_indexText;
     QLabel *m_scoreValue;
     QLabel *m_metricSpeed;
@@ -383,7 +383,7 @@ public:
     QLabel *m_metricSwing;
     QLabel *m_aiComment;
     QLabel *m_aiImprove;
-    QString m_source; // "training" or "classTrain"
+    QString m_source; // "training" / "match" / "classTrain"
 
 protected:
     void hideEvent(QHideEvent *event) override;
@@ -409,6 +409,7 @@ private:
     int m_replayWaitTicks = 0;
     QString m_pendingReplaySession;
     int m_pendingHitIdx = 0;
+    int m_detailBackPage = 5;
     double m_playbackRate = 1.0;
 };
 
@@ -510,9 +511,12 @@ public:
         QString aiSuggestion;
         int speedKmh = 0;
         int powerTen = 0;
+        int hitIdx = 0;       /* 全场击球序号，对应回放 hit_N */
+        int durationMs = -1;
     };
     QList<PlayerReportLine> playerReportLines() const;
     QList<MatchHitRecord> hitRecords() const { return m_hitRecords; }
+    QString replaySessionId() const { return m_replaySessionId; }
     int m_hits, m_speedSum, m_speedCount, m_maxSpeed;
     int m_powerSum, m_powerCount;
     qint64 m_startedAt, m_endedAt;
@@ -552,6 +556,7 @@ private:
     struct PendingVisionHit {
         int playerIdx = -1;
         int hitIdx = 0;
+        int replayHitIdx = 0;
         qint64 triggerMs = 0;
         qint64 resolveAfterMs = 0;
         int speedKmh = 0;
@@ -574,11 +579,13 @@ private:
     void onPlayerImuHit(int playerIdx, double speedKmh, int powerTen, int durationMs, const QString &imuType,
                         int strokeClassId, float strokeConf);
     void onPlayerCameraHit(int playerIdx, int clsId, const QString &nameCn, float camScore);
-    void scheduleVisionResolve(int playerIdx, int hitIdx, qint64 triggerMs, int speedKmh, int powerTen, int durationMs,
-                               const QString &imuType, int strokeClassId, float strokeConf, int provisionalScore);
+    void scheduleVisionResolve(int playerIdx, int hitIdx, int replayHitIdx, qint64 triggerMs, int speedKmh,
+                               int powerTen, int durationMs, const QString &imuType, int strokeClassId,
+                               float strokeConf, int provisionalScore);
     void pollPendingVisionHits();
     void finalizeHitVision(PendingVisionHit &pending);
     void refreshPlayerPanel(int playerIdx);
+    void registerHitReplay(int hitIdx);
     void subscribeImu();
     void unsubscribeImu();
 
@@ -594,6 +601,7 @@ private:
     QList<MatchHitRecord> m_hitRecords;
     QList<PendingVisionHit> m_pendingHits;
     QTimer *m_visionPollTimer = nullptr;
+    QString m_replaySessionId;
     bool m_imuSubscribed = false;
     bool m_cameraHitSubscribed = false;
     bool m_prevYoloStable = false;
@@ -611,6 +619,15 @@ class MatchReportPage : public PageBase {
 public:
     MatchReportPage(MainWindow *mw, QWidget *parent = nullptr);
     void showReport(MatchRunningPage *running);
+    QString replaySessionId() const { return m_replaySessionId; }
+
+signals:
+    /** hitIdx 为全场击球序号（从 1 起），对应回放 hit_N */
+    void actionClicked(int hitIdx, int score, const QString &playerName, const QString &actionType,
+                       int speedKmh, int powerTen, int durationMs);
+
+private:
+    QString m_replaySessionId;
 };
 
 // ═══════════════════════════════════════════════

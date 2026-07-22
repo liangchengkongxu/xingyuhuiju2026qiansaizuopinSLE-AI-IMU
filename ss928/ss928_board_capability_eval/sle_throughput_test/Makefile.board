@@ -1,0 +1,53 @@
+CC       = gcc
+WS73_INC = /tmp/sle_tp_build
+LIBDIR   = /tmp/sle_tp_build/lib
+
+CFLAGS  += -Wall -O2 -fPIC
+CFLAGS  += -I. -I$(WS73_INC)/include/bsle/common -I$(WS73_INC)/include/bsle/sle
+CFLAGS  += -I$(WS73_INC)/driver/platform/libc_sec/include
+CFLAGS  += -I$(WS73_INC)/driver/platform/drv/include
+CFLAGS  += -I$(WS73_INC)/driver/platform/osal/include
+LDFLAGS += -lm -lpthread -lrt -ldl -Wl,--gc-sections
+
+COMMON_SRCS = sle_tp_common.c
+SERVER_SRCS = sle_tp_server_main.c sle_tp_server.c sle_tp_server_adv.c
+CLIENT_SRCS = sle_tp_client_main.c sle_tp_client.c
+
+SERVER_OBJS = $(SERVER_SRCS:.c=.o) sle_tp_common.o
+CLIENT_OBJS = $(CLIENT_SRCS:.c=.o) sle_tp_common.o
+
+TARGETS = sle_tp_client
+CLIENT_TARGET = sle_tp_client
+
+all: $(CLIENT_TARGET)
+
+client: sle_tp_client
+
+server: sle_tp_server
+
+sle_tp_server: $(SERVER_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ -Xlinker "-(" $(LIBDIR)/libsle_host.a -Xlinker "-)"
+
+sle_tp_client: $(CLIENT_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ -Xlinker "-(" $(LIBDIR)/libsle_host.a -Xlinker "-)"
+
+%.o: %.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+sle_tp_common.o: sle_tp_common.c sle_tp_common.h
+	$(CC) $(CFLAGS) -c -o $@ sle_tp_common.c
+
+clean:
+	rm -f sle_tp_server sle_tp_client *.o
+
+install: install-client
+
+install-client: sle_tp_client
+	cp -f sle_tp_client /opt/sample/ws73/
+	chmod +x /opt/sample/ws73/sle_tp_client
+
+install-server: server
+	cp -f sle_tp_server /opt/sample/ws73/
+	chmod +x /opt/sample/ws73/sle_tp_server
+
+.PHONY: all client server clean install install-client install-server

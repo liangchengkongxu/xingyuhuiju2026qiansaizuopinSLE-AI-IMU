@@ -1219,7 +1219,7 @@ void ActionDetailPage::playReplayClip(const QString &clipPath)
     if (clipPath.isEmpty()) {
         if (m_videoStack && m_replayPlaceholder) {
             m_videoStack->setCurrentWidget(m_replayPlaceholder);
-            m_replayPlaceholder->setText(QStringLiteral("暂无击球回放\n\n请完成一次单人练习并击球后再查看。"));
+            m_replayPlaceholder->setText(QStringLiteral("暂无击球回放\n\n请完成练习或比赛并击球后再查看。"));
         }
         return;
     }
@@ -1403,8 +1403,9 @@ ActionDetailPage::ActionDetailPage(MainWindow *mw, QWidget *parent)
     metricsGrid->setSpacing(10);
     metricsGrid->addWidget(makeTrainMetricChip(QStringLiteral("球速"), m_metricSpeed, QStringLiteral("km/h")), 0, 0);
     metricsGrid->addWidget(makeTrainMetricChip(QStringLiteral("击球力度"), m_metricPower, QStringLiteral("/10")), 0, 1);
-    metricsGrid->addWidget(makeTrainMetricChip(QStringLiteral("击球时机"), m_metricTiming), 1, 0);
-    metricsGrid->addWidget(makeTrainMetricChip(QStringLiteral("挥拍幅度"), m_metricSwing), 1, 1);
+    metricsGrid->addWidget(makeTrainMetricChip(QStringLiteral("击球类型"), m_metricSwing), 1, 0, 1, 2);
+    m_metricTiming = new QLabel();
+    m_metricTiming->hide();
 
     kpiRow->addWidget(kpiCard, 0, 0, Qt::AlignTop);
     kpiRow->addWidget(metricsWrap, 0, 1, Qt::AlignTop);
@@ -1588,13 +1589,15 @@ ActionDetailPage::ActionDetailPage(MainWindow *mw, QWidget *parent)
 }
 
 void ActionDetailPage::showAction(int idx, int score, const QString &skillLabel, int speedKmh, int powerTen,
-                                  const QString &replaySessionId, int durationMs, const QString &hitType)
+                                  const QString &replaySessionId, int durationMs, const QString &hitType, int backPage)
 {
-    m_source = "training";
+    m_source = (backPage == 9) ? QStringLiteral("match") : QStringLiteral("training");
     m_pendingReplaySession = replaySessionId;
     m_pendingHitIdx = idx;
-    connect(m_backBtn, &QPushButton::clicked, m_mainWindow, [this]() { m_mainWindow->switchPage(5); }, Qt::UniqueConnection);
-    m_backBtn->setText(QStringLiteral("返回总结"));
+    m_detailBackPage = backPage;
+    connect(m_backBtn, &QPushButton::clicked, m_mainWindow,
+            [this]() { m_mainWindow->switchPage(m_detailBackPage); }, Qt::UniqueConnection);
+    m_backBtn->setText(backPage == 9 ? QStringLiteral("返回比赛报告") : QStringLiteral("返回总结"));
     m_titleLabel->setText(skillLabel + QStringLiteral(" · 第 %1 次").arg(idx));
     m_indexText->setText(QStringLiteral("第 %1 次").arg(idx));
     m_scoreValue->setText(QString::number(score));
@@ -1607,14 +1610,10 @@ void ActionDetailPage::showAction(int idx, int score, const QString &skillLabel,
     int power = powerTen;
     if (power < 0)
         power = std::max(1, std::min(10, score / 10));
-    QString timing = (QStringList{QStringLiteral("偏早"), QStringLiteral("合适"), QStringLiteral("偏晚")})[randInt(0, 2)];
-    QString swing = (QStringList{QStringLiteral("偏小"), QStringLiteral("合适"), QStringLiteral("偏大")})[randInt(0, 2)];
 
     m_metricSpeed->setText(QString::number(speed));
     m_metricPower->setText(QString::number(power));
     const QString typeLabel = hitType.trimmed().isEmpty() ? skillLabel : hitType.trimmed();
-    m_metricTiming->setText(durationMs >= 0 ? QStringLiteral("%1 ms").arg(durationMs)
-                                            : timing);
     m_metricSwing->setText(typeLabel);
 
     m_aiComment->setText(QStringLiteral("「%1」本次击球综合得分 %2 分，可结合右侧回放查看挥拍节奏与击球点。").arg(typeLabel).arg(score));

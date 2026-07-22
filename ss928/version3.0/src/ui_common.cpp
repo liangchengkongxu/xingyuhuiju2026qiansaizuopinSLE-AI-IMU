@@ -120,7 +120,7 @@
             return ms;
         }
     }
-    return 0;
+    return 1500;
 }
 
 /** 单人练习：摄像头挥拍事件最低置信（0–1） */
@@ -131,7 +131,7 @@
     if (ok && pct >= 30 && pct <= 95) {
         return static_cast<float>(pct) / 100.0f;
     }
-    return 0.48f;
+    return 0.40f;
 }
 
 /** 单人练习：摄像头稳定识别触发阈值（0–1） */

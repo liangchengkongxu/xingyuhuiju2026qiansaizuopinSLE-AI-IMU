@@ -13,6 +13,9 @@
 #include <QResizeEvent>
 #include <QEvent>
 #include <QFile>
+#include <QDir>
+#include <QScroller>
+#include <QScrollerProperties>
 #include <QDebug>
 #include <cmath>
 #include <algorithm>
@@ -22,11 +25,11 @@
 #include "ui_pages.h"
 #include "main_window.h"
 #include "class_hit_ai_advice.h"
+#include "sle_seek_service.h"
 
 namespace {
 
 static constexpr int kMatchMaxPlayers = 4;
-static constexpr qint64 kVisionWindowMs = 1000;
 
 static QString normalizeMac(const QString &mac)
 {
@@ -45,12 +48,10 @@ static QString imuHitTypeLabel(const QString &imuType, int strokeClassId, float 
 
 static int deviceNoFromMac(const QString &mac)
 {
-    const QString norm = normalizeMac(mac);
-    if (norm.length() < 2)
-        return 0;
-    bool ok = false;
-    const int n = norm.right(2).toInt(&ok, 16);
-    return (ok && n > 0) ? n : 0;
+    /* 与扫描服务一致：设备号取星闪 MAC 最后一位十六进制数字 */
+    QString withColons = mac.trimmed().toUpper();
+    withColons.replace(QLatin1Char('-'), QLatin1Char(':'));
+    return sleAssignDeviceId(withColons);
 }
 
 static QString deviceNameFromMac(const QString &mac)
@@ -58,6 +59,8 @@ static QString deviceNameFromMac(const QString &mac)
     const int no = deviceNoFromMac(mac);
     return no > 0 ? QStringLiteral("设备%1").arg(no) : QStringLiteral("未知设备");
 }
+
+static constexpr qint64 kVisionWindowMs = 1000;
 
 } // namespace
 
@@ -1151,11 +1154,24 @@ void MatchRunningPage::onPlayerImuHit(int playerIdx, double speedKmh, int powerT
     if (ps.adviceLabel)
         ps.adviceLabel->setText(pickClassHitAiAdvice(ctx));
 
+    MatchHitRecord provisional;
+    provisional.playerName = ps.binding.deviceName;
+    provisional.actionType = typeLabel;
+    provisional.score = score;
+    provisional.aiSuggestion = pickClassHitAiAdvice(ctx);
+    provisional.speedKmh = speed;
+    provisional.powerTen = power;
+    provisional.hitIdx = m_hits;
+    provisional.durationMs = durationMs;
+    m_hitRecords.append(provisional);
+
     refreshPlayerPanel(playerIdx);
 
     const qint64 triggerMs = QDateTime::currentMSecsSinceEpoch();
-    scheduleVisionResolve(playerIdx, ps.hits, triggerMs, speed, power, durationMs, typeLabel, strokeClassId,
-                          strokeConf, score);
+    const int replayHitIdx = m_hits;
+    registerHitReplay(replayHitIdx);
+    scheduleVisionResolve(playerIdx, ps.hits, replayHitIdx, triggerMs, speed, power, durationMs, typeLabel,
+                          strokeClassId, strokeConf, score);
 }
 
 void MatchRunningPage::onPlayerCameraHit(int playerIdx, int clsId, const QString &nameCn, float camScore)
@@ -1197,8 +1213,11 @@ void MatchRunningPage::onPlayerCameraHit(int playerIdx, int clsId, const QString
     rec.aiSuggestion = pickClassHitAiAdvice(ctx);
     rec.speedKmh = 0;
     rec.powerTen = kCamPowerNeutral;
+    rec.hitIdx = m_hits;
+    rec.durationMs = -1;
     m_hitRecords.append(rec);
 
+    registerHitReplay(m_hits);
     refreshPlayerPanel(playerIdx);
 }
 
@@ -1242,13 +1261,14 @@ void MatchRunningPage::onCameraSwingDetected(int swingSeq, int clsId, const QStr
     onPlayerCameraHit(playerIdx, clsId, nameCn, score);
 }
 
-void MatchRunningPage::scheduleVisionResolve(int playerIdx, int hitIdx, qint64 triggerMs, int speedKmh, int powerTen,
-                                             int durationMs, const QString &imuType, int strokeClassId,
-                                             float strokeConf, int provisionalScore)
+void MatchRunningPage::scheduleVisionResolve(int playerIdx, int hitIdx, int replayHitIdx, qint64 triggerMs,
+                                             int speedKmh, int powerTen, int durationMs, const QString &imuType,
+                                             int strokeClassId, float strokeConf, int provisionalScore)
 {
     PendingVisionHit p;
     p.playerIdx = playerIdx;
     p.hitIdx = hitIdx;
+    p.replayHitIdx = replayHitIdx;
     p.triggerMs = triggerMs;
     p.resolveAfterMs = triggerMs + kVisionWindowMs;
     p.speedKmh = speedKmh;
@@ -1301,14 +1321,34 @@ void MatchRunningPage::finalizeHitVision(PendingVisionHit &pending)
     if (ps.adviceLabel)
         ps.adviceLabel->setText(pickClassHitAiAdvice(ctx));
 
-    MatchHitRecord rec;
-    rec.playerName = ps.binding.deviceName;
-    rec.actionType = finalType;
-    rec.score = finalScore;
-    rec.aiSuggestion = pickClassHitAiAdvice(ctx);
-    rec.speedKmh = pending.speedKmh;
-    rec.powerTen = pending.powerTen;
-    m_hitRecords.append(rec);
+    /* 更新已写入的临时记录，避免同一击球在报告里出现两次 */
+    const int replayIdx = pending.replayHitIdx > 0 ? pending.replayHitIdx : pending.hitIdx;
+    bool updated = false;
+    for (auto &rec : m_hitRecords) {
+        if (rec.hitIdx == replayIdx) {
+            rec.playerName = ps.binding.deviceName;
+            rec.actionType = finalType;
+            rec.score = finalScore;
+            rec.aiSuggestion = pickClassHitAiAdvice(ctx);
+            rec.speedKmh = pending.speedKmh;
+            rec.powerTen = pending.powerTen;
+            rec.durationMs = pending.durationMs;
+            updated = true;
+            break;
+        }
+    }
+    if (!updated) {
+        MatchHitRecord rec;
+        rec.playerName = ps.binding.deviceName;
+        rec.actionType = finalType;
+        rec.score = finalScore;
+        rec.aiSuggestion = pickClassHitAiAdvice(ctx);
+        rec.speedKmh = pending.speedKmh;
+        rec.powerTen = pending.powerTen;
+        rec.hitIdx = replayIdx;
+        rec.durationMs = pending.durationMs;
+        m_hitRecords.append(rec);
+    }
 
     refreshPlayerPanel(pending.playerIdx);
     pending.resolved = true;
@@ -1387,6 +1427,10 @@ void MatchRunningPage::startRunning()
     m_prevYoloCls = -1;
     m_prevYoloScore = 0.0f;
 
+    m_replaySessionId = QStringLiteral("match_%1").arg(QDateTime::currentMSecsSinceEpoch());
+    publishReplaySession(m_replaySessionId);
+    QDir().mkpath(replaySessionDir(m_replaySessionId));
+
     for (auto &ps : m_playerStats) {
         ps.hits = 0;
         ps.speedSum = 0;
@@ -1429,6 +1473,15 @@ void MatchRunningPage::stopRunning()
     for (auto &p : m_pendingHits)
         finalizeHitVision(p);
     m_pendingHits.clear();
+    /* 保留 m_replaySessionId 供报告页打开回放；仅停止 AI 继续采集 */
+    clearReplaySession();
+}
+
+void MatchRunningPage::registerHitReplay(int hitIdx)
+{
+    if (m_replaySessionId.isEmpty() || hitIdx <= 0)
+        return;
+    requestHitReplayCapture(m_replaySessionId, hitIdx);
 }
 
 QList<MatchRunningPage::PlayerReportLine> MatchRunningPage::playerReportLines() const
@@ -1469,9 +1522,113 @@ void MatchReportPage::showReport(MatchRunningPage *running)
         delete child;
     }
 
-    auto *wrap = new QVBoxLayout();
-    wrap->setContentsMargins(24, 24, 24, 24);
-    wrap->setSpacing(16);
+    m_replaySessionId = running ? running->replaySessionId() : QString();
+    QList<MatchRunningPage::MatchHitRecord> records =
+        running ? running->hitRecords() : QList<MatchRunningPage::MatchHitRecord>();
+
+    /* —— 置顶回放区：不进滚动，保证第一眼可见 —— */
+    auto *replayBar = new QFrame();
+    replayBar->setObjectName(QStringLiteral("replayBar"));
+    replayBar->setMinimumHeight(200);
+    replayBar->setStyleSheet(QStringLiteral(
+        "QFrame#replayBar {"
+        "  border: 2px solid #56baff; border-radius: 14px;"
+        "  background: #0d2848;"
+        "  margin: 8px 16px 4px 16px;"
+        "}"));
+    auto *rbLay = new QVBoxLayout(replayBar);
+    rbLay->setContentsMargins(14, 12, 14, 12);
+    rbLay->setSpacing(10);
+
+    auto *hitTitle = new QLabel(
+        QStringLiteral("击球回放入口（共 %1 次）· 点下方卡片查看").arg(records.size()));
+    hitTitle->setStyleSheet(
+        QStringLiteral("font-size:24px; font-weight:800; color:#56baff; background:transparent;"));
+    rbLay->addWidget(hitTitle);
+
+    if (records.isEmpty()) {
+        auto *empty = new QLabel(running && running->m_hits > 0
+                                     ? QStringLiteral("统计有击球，但明细列表为空。请再打一场后查看。")
+                                     : QStringLiteral("本场尚无击球记录。比赛中击球后，这里会出现可点卡片。"));
+        empty->setWordWrap(true);
+        empty->setStyleSheet(QStringLiteral("font-size:20px; color:#cfe2ff; background:transparent;"));
+        rbLay->addWidget(empty);
+    } else {
+        auto *row = new QHBoxLayout();
+        row->setSpacing(10);
+        const int showN = qMin(records.size(), 4);
+        for (int i = 0; i < showN; ++i) {
+            const auto &rec = records[i];
+            const int hitIdx = rec.hitIdx > 0 ? rec.hitIdx : (i + 1);
+            auto *card = new QPushButton(
+                QStringLiteral("第%1次\n%2\n%3分\n查看回放")
+                    .arg(hitIdx)
+                    .arg(rec.actionType.trimmed().isEmpty() ? QStringLiteral("挥拍") : rec.actionType.trimmed())
+                    .arg(rec.score));
+            card->setMinimumSize(170, 140);
+            card->setCursor(Qt::PointingHandCursor);
+            card->setStyleSheet(QStringLiteral(
+                "QPushButton {"
+                "  border: 2px solid #3d7fd4; border-radius: 12px;"
+                "  background: #15406f; color: #eaf3ff;"
+                "  font-size: 22px; font-weight: 700;"
+                "}"
+                "QPushButton:pressed { background: #1a5a9a; border-color: #56baff; }"));
+            const int score = rec.score;
+            const QString playerName = rec.playerName;
+            const QString actionType = rec.actionType;
+            const int speedKmh = rec.speedKmh;
+            const int powerTen = rec.powerTen;
+            const int durationMsHit = rec.durationMs;
+            connect(card, &QPushButton::clicked, this,
+                    [this, hitIdx, score, playerName, actionType, speedKmh, powerTen, durationMsHit]() {
+                        emit actionClicked(hitIdx, score, playerName, actionType, speedKmh, powerTen, durationMsHit);
+                    });
+            row->addWidget(card);
+        }
+        if (records.size() > 4) {
+            auto *more = new QLabel(QStringLiteral("…还有 %1 次\n请下滚查看").arg(records.size() - 4));
+            more->setAlignment(Qt::AlignCenter);
+            more->setStyleSheet(QStringLiteral("font-size:16px; color:#9eb7de; background:transparent;"));
+            row->addWidget(more);
+        }
+        row->addStretch(1);
+        rbLay->addLayout(row);
+    }
+    m_rootLayout->addWidget(replayBar, 0);
+
+    /* —— 下方可滚动：总览 + 全部击球卡片 + 球员统计 —— */
+    auto *pageScroll = new QScrollArea();
+    pageScroll->setWidgetResizable(true);
+    pageScroll->setFrameShape(QFrame::NoFrame);
+    pageScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    pageScroll->setStyleSheet(QStringLiteral(
+        "QScrollArea { border: none; background: transparent; }"
+        "QScrollBar:vertical { width: 12px; background: #0a1a33; }"
+        "QScrollBar::handle:vertical { background: #2e63ac; border-radius: 4px; min-height: 40px; }"));
+    pageScroll->viewport()->setAttribute(Qt::WA_AcceptTouchEvents, true);
+    QScroller::grabGesture(pageScroll->viewport(), QScroller::TouchGesture);
+    QScroller::grabGesture(pageScroll->viewport(), QScroller::LeftMouseButtonGesture);
+    if (QScroller *sc = QScroller::scroller(pageScroll->viewport())) {
+        QScrollerProperties sp = sc->scrollerProperties();
+        sp.setScrollMetric(QScrollerProperties::FrameRate,
+                           QVariant::fromValue(QScrollerProperties::Fps60));
+        sp.setScrollMetric(QScrollerProperties::DragStartDistance, QVariant::fromValue<qreal>(0.002));
+        sp.setScrollMetric(QScrollerProperties::DragVelocitySmoothingFactor,
+                           QVariant::fromValue<qreal>(0.8));
+        sp.setScrollMetric(QScrollerProperties::MinimumVelocity, QVariant::fromValue<qreal>(0.02));
+        sp.setScrollMetric(QScrollerProperties::MaximumVelocity, QVariant::fromValue<qreal>(1.2));
+        sp.setScrollMetric(QScrollerProperties::DecelerationFactor, QVariant::fromValue<qreal>(0.1));
+        sp.setScrollMetric(QScrollerProperties::OvershootDragResistanceFactor,
+                           QVariant::fromValue<qreal>(0.3));
+        sc->setScrollerProperties(sp);
+    }
+
+    auto *content = new QWidget();
+    content->setStyleSheet(QStringLiteral("background: transparent;"));
+    auto *wrap = new QVBoxLayout(content);
+    wrap->setContentsMargins(24, 12, 24, 24);
+    wrap->setSpacing(14);
 
     auto *head = new QFrame();
     head->setObjectName(QStringLiteral("card"));
@@ -1479,20 +1636,15 @@ void MatchReportPage::showReport(MatchRunningPage *running)
         QStringLiteral("QFrame#card { border: 1px solid #234f8c; border-radius: 16px; background: #0a1a33c7; }"));
     auto *hdLay = new QHBoxLayout(head);
     hdLay->setContentsMargins(16, 14, 16, 14);
-    auto *hdLeft = new QVBoxLayout();
     auto *hdTitle = new QLabel(QStringLiteral("本次对打 / 比赛报告"));
     hdTitle->setStyleSheet(
-        QStringLiteral("font-size:%1px; font-weight:800; background:transparent; color:#eaf3ff;").arg(26));
-    hdLeft->addWidget(hdTitle);
-    auto *hdSub = new QLabel(QStringLiteral("数据来源：拍柄 IMU + 摄像头 AI"));
-    hdSub->setStyleSheet(QStringLiteral("font-size:%1px; color:#9eb7de; background:transparent;").arg(19));
-    hdLeft->addWidget(hdSub);
-    hdLay->addLayout(hdLeft);
+        QStringLiteral("font-size:26px; font-weight:800; background:transparent; color:#eaf3ff;"));
+    hdLay->addWidget(hdTitle);
     hdLay->addStretch();
-    auto *badge = new QLabel(QStringLiteral("已结束"));
+    auto *badge = new QLabel(QStringLiteral("共 %1 次击球").arg(running ? running->m_hits : 0));
     badge->setStyleSheet(
-        QStringLiteral("font-size:14px; font-weight:700; color:#cfe2ff; border:1px solid #2b5aa0; "
-                       "border-radius:999px; padding:6px 14px; background:#07172f7a;"));
+        QStringLiteral("font-size:16px; font-weight:700; color:#cfe2ff; border:1px solid #2b5aa0; "
+                       "border-radius:999px; padding:8px 16px; background:#07172f7a;"));
     hdLay->addWidget(badge);
     wrap->addWidget(head);
 
@@ -1506,7 +1658,6 @@ void MatchReportPage::showReport(MatchRunningPage *running)
 
     auto *grid = new QGridLayout();
     grid->setSpacing(10);
-
     struct CardData {
         QString k;
         QString v;
@@ -1519,30 +1670,68 @@ void MatchReportPage::showReport(MatchRunningPage *running)
         {QStringLiteral("平均力度"), QStringLiteral("%1 /10").arg(avgPower)},
         {QStringLiteral("参赛人数"), QStringLiteral("%1 人").arg(running->m_players.size())},
     };
-
     for (int i = 0; i < 6; ++i) {
         auto *card = new QFrame();
         card->setObjectName(QStringLiteral("card"));
-        card->setFixedHeight(110);
+        card->setFixedHeight(90);
         card->setStyleSheet(
             QStringLiteral("QFrame#card { border: 1px solid #2e63ac; border-radius: 14px; "
                            "background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #12325a, stop:1 #0e2445); }"));
         auto *cl = new QVBoxLayout(card);
-        cl->setContentsMargins(14, 12, 14, 12);
+        cl->setContentsMargins(12, 8, 12, 8);
         auto *kl = new QLabel(cards[i].k);
-        kl->setStyleSheet(QStringLiteral("color:#8cc7ff; font-size:%1px; background:transparent;").arg(19));
+        kl->setStyleSheet(QStringLiteral("color:#8cc7ff; font-size:17px; background:transparent;"));
         cl->addWidget(kl);
         auto *vl = new QLabel(cards[i].v);
-        vl->setStyleSheet(QStringLiteral("color:#eaf3ff; font-size:%1px; font-weight:900; background:transparent;").arg(43));
+        vl->setStyleSheet(QStringLiteral("color:#eaf3ff; font-size:30px; font-weight:900; background:transparent;"));
         cl->addWidget(vl);
         grid->addWidget(card, i / 3, i % 3);
     }
     wrap->addLayout(grid);
 
-    if (!running->playerReportLines().isEmpty()) {
+    if (!records.isEmpty()) {
+        auto *allTitle = new QLabel(QStringLiteral("全部击球记录"));
+        allTitle->setStyleSheet(
+            QStringLiteral("font-size:24px; font-weight:800; color:#8cc7ff; background:transparent;"));
+        wrap->addWidget(allTitle);
+        auto *scoreGrid = new QGridLayout();
+        scoreGrid->setSpacing(12);
+        for (int i = 0; i < records.size(); ++i) {
+            const auto &rec = records[i];
+            const int hitIdx = rec.hitIdx > 0 ? rec.hitIdx : (i + 1);
+            auto *card = new QPushButton(
+                QStringLiteral("第%1次 · %2\n%3 · %4分\n点击查看回放")
+                    .arg(hitIdx)
+                    .arg(rec.playerName)
+                    .arg(rec.actionType.trimmed().isEmpty() ? QStringLiteral("挥拍") : rec.actionType.trimmed())
+                    .arg(rec.score));
+            card->setMinimumSize(220, 130);
+            card->setCursor(Qt::PointingHandCursor);
+            card->setStyleSheet(QStringLiteral(
+                "QPushButton {"
+                "  border: 2px solid #3d7fd4; border-radius: 14px;"
+                "  background: #15406f; color: #eaf3ff; font-size: 22px; font-weight: 700;"
+                "}"
+                "QPushButton:pressed { background: #1a5a9a; }"));
+            const int score = rec.score;
+            const QString playerName = rec.playerName;
+            const QString actionType = rec.actionType;
+            const int speedKmh = rec.speedKmh;
+            const int powerTen = rec.powerTen;
+            const int durationMsHit = rec.durationMs;
+            connect(card, &QPushButton::clicked, this,
+                    [this, hitIdx, score, playerName, actionType, speedKmh, powerTen, durationMsHit]() {
+                        emit actionClicked(hitIdx, score, playerName, actionType, speedKmh, powerTen, durationMsHit);
+                    });
+            scoreGrid->addWidget(card, i / 4, i % 4);
+        }
+        wrap->addLayout(scoreGrid);
+    }
+
+    if (running && !running->playerReportLines().isEmpty()) {
         auto *playerTitle = new QLabel(QStringLiteral("各球员统计"));
         playerTitle->setStyleSheet(
-            QStringLiteral("font-size:%1px; font-weight:800; color:#8cc7ff; background:transparent;").arg(29));
+            QStringLiteral("font-size:24px; font-weight:800; color:#8cc7ff; background:transparent;"));
         wrap->addWidget(playerTitle);
         for (const auto &line : running->playerReportLines()) {
             auto *row = new QLabel(QStringLiteral("%1 · 击球 %2 次 · 均分 %3 · 均速 %4 km/h")
@@ -1550,10 +1739,12 @@ void MatchReportPage::showReport(MatchRunningPage *running)
                                        .arg(line.hits)
                                        .arg(line.hits > 0 ? QString::number(line.avgScore) : QStringLiteral("--"))
                                        .arg(line.avgSpeed > 0 ? line.avgSpeed : 0));
-            row->setStyleSheet(QStringLiteral("font-size:%1px; color:#d9e9ff; background:transparent;").arg(26));
+            row->setStyleSheet(QStringLiteral("font-size:22px; color:#d9e9ff; background:transparent;"));
             wrap->addWidget(row);
         }
     }
 
-    m_rootLayout->addLayout(wrap);
+    wrap->addStretch(1);
+    pageScroll->setWidget(content);
+    m_rootLayout->addWidget(pageScroll, 1);
 }

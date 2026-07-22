@@ -24,6 +24,7 @@
 #include "acl.h"
 #include "ss_mpi_region.h"
 #include "ss_mpi_vo.h"
+#include "vio_ai_internal.h"
 
 static const char *g_model_path = "/opt/widget_ui/models/best_aipp_fix.om";
 
@@ -43,10 +44,10 @@ static const char *g_model_path = "/opt/widget_ui/models/best_aipp_fix.om";
         } \
     } while (0)
 
-static aclmdlDesc *g_model_desc = TD_NULL;
+aclmdlDesc *g_model_desc = TD_NULL;
 static aclmdlDataset *g_input_dataset = TD_NULL;
 static aclmdlDataset *g_output_dataset = TD_NULL;
-static uint32_t g_model_id = 0;
+uint32_t g_model_id = 0;
 static ot_vi_pipe g_active_vi_pipe = 0;
 typedef struct {
     float scale;
@@ -65,19 +66,10 @@ static yolo_preproc_meta_t g_preproc_meta = {1.0f, 0.0f, 0.0f, 640, 640, 640, 64
 #define YOLO_IOU_THRES 0.70f
 #define YOLO_PRINT_TOPK 5
 
-typedef struct {
-    float x1;
-    float y1;
-    float x2;
-    float y2;
-    float score;
-    int cls_id;
-} yolo_det_t;
-
 static yolo_det_t g_draw_dets[YOLO_MAX_DET];
 static int g_draw_det_cnt = 0;
 static td_bool g_rgn_inited = TD_FALSE;
-static td_bool g_rgn_chn_ready = TD_FALSE;
+td_bool g_rgn_chn_ready = TD_FALSE;
 static int g_yolo_box_draw = 0;
 static td_bool g_attach_pipeline_mode = TD_FALSE;
 
@@ -87,10 +79,6 @@ typedef struct {
     size_t storage_sz;
 } vio_ai_owned_frame_t;
 
-static td_s32 ai_pose_infer(const ot_video_frame_info *frame_info);
-static td_void pose_rgn_clear_now(td_void);
-static td_void pose_rgn_expire_if_stale(td_void);
-static td_void pose_rgn_redraw_cached(td_void);
 
 /* 拷贝 NV12 后立即 release VPSS 帧，避免 NPU 推理占满 depth 导致 ch0 预览停更 */
 static td_s32 vio_ai_own_frame(const ot_video_frame_info *src, vio_ai_owned_frame_t *out)
@@ -200,14 +188,14 @@ static td_bool sample_vio_ai_ensure_vpss_depth(ot_vpss_grp grp, ot_vpss_chn chn,
     return (ret == TD_SUCCESS) ? TD_TRUE : TD_FALSE;
 }
 
-static ot_mpp_chn g_rgn_chn = {0};
-static ot_vpss_grp g_attach_grp = 0;
-static ot_vpss_chn g_attach_chn = 0;
+ot_mpp_chn g_rgn_chn = {0};
+ot_vpss_grp g_attach_grp = 0;
+ot_vpss_chn g_attach_chn = 0;
 /* 检测框在 640 网络坐标；叠加到预览通道/VO 时需缩放到实际显示分辨率 */
-static td_u32 g_rgn_disp_ox = 0;
-static td_u32 g_rgn_disp_oy = 0;
-static td_u32 g_rgn_disp_w = 1920;
-static td_u32 g_rgn_disp_h = 1080;
+td_u32 g_rgn_disp_ox = 0;
+td_u32 g_rgn_disp_oy = 0;
+td_u32 g_rgn_disp_w = 1920;
+td_u32 g_rgn_disp_h = 1080;
 static td_u32 g_rgn_net_w = 640;
 static td_u32 g_rgn_net_h = 640;
 
@@ -218,11 +206,14 @@ static td_u32 g_rgn_net_h = 640;
 #define YOLO_ACTION_STABLE_MIN 2
 #define YOLO_ACTION_CONF_DEFAULT 0.40f
 #define YOLO_SWING_CONF_RATIO 0.85f   /* 挥拍判定可用略低于显示阈值 */
-#define YOLO_SWING_COOLDOWN_MS_DEFAULT 800
-#define YOLO_SWING_VEL_THRES_DEFAULT 0.14f
-#define YOLO_SWING_PEAK_THRES_DEFAULT 0.18f
-#define YOLO_SWING_MIN_ACTIVE_FRAMES 2
-#define YOLO_SWING_FIRE_SCORE_FLOOR 0.22f  /* 挥拍触发与显示 40% 阈值解耦 */
+#define YOLO_SWING_COOLDOWN_MS_DEFAULT 1500
+#define YOLO_SWING_VEL_THRES_DEFAULT 0.18f
+#define YOLO_SWING_PEAK_THRES_DEFAULT 0.28f
+#define YOLO_SWING_MIN_ACTIVE_FRAMES 5   /* 需持续运动，避免抬手即触发 */
+#define YOLO_SWING_DROP_RATIO 0.55f      /* 峰后需明显回落，短暂停顿不触发 */
+#define YOLO_SWING_PEAK_MARGIN 1.25f     /* 峰值相对进入阈值的倍率 */
+#define YOLO_SWING_QUIET_FRAMES 8        /* 触发后需安静若干帧再重新武装 */
+#define YOLO_SWING_FIRE_SCORE_FLOOR 0.30f  /* 挥拍触发与显示阈值解耦 */
 #define YOLO_SERVE_CLASS_ID 4
 #define YOLO_SERVE_PHASE_SCALE_DEFAULT 0.05f  /* 挥拍投票里发球全局再降权 */
 #define YOLO_SERVE_WIN_RATIO_DEFAULT 3.50f    /* 发球须远超次优非发球才采纳 */
@@ -275,8 +266,8 @@ typedef struct {
 static yolo_track_slot_t g_track_slots[YOLO_TRACK_SLOTS];
 static yolo_det_t g_prev_show_dets[YOLO_MAX_DET];
 static int g_prev_show_cnt = 0;
-static td_u32 g_preview_src_w = 1920U;
-static td_u32 g_preview_src_h = 1080U;
+td_u32 g_preview_src_w = 1920U;
+td_u32 g_preview_src_h = 1080U;
 static int g_yolo_show_max = 1;
 static float g_yolo_smooth_alpha = YOLO_SMOOTH_ALPHA;
 static float g_yolo_smooth_size_alpha = YOLO_SMOOTH_SIZE_ALPHA;
@@ -307,70 +298,43 @@ static const char *g_cls_names6_cn[YOLO_NUM_CLASSES] = {
 };
 static int g_ai_cls_mode = 0;
 #define YOLO_COCO_PERSON_CLASS_ID 0
-#define YOLO_INFER_POST_AUTO  0
-#define YOLO_INFER_POST_CLS   1
-#define YOLO_INFER_POST_PERSON 2
-#define YOLO_INFER_POST_POSE  3
-static int g_infer_post_mode = YOLO_INFER_POST_AUTO;
+int g_infer_post_mode = YOLO_INFER_POST_AUTO;
 
-#define POSE_RGN_LINE_BASE    80
-#define POSE_SKELETON_EDGES   19
-#define POSE_RGN_BBOX_HANDLE  (POSE_RGN_LINE_BASE + POSE_SKELETON_EDGES)
-#define POSE_LINE_COLOR       0x00ff00U
-#define POSE_NUM_KEYPOINTS    17
-#define POSE_FEAT_CHANNELS    56
-#define POSE_ANCHOR_NUM       8400
-
-typedef struct {
-    float x;
-    float y;
-    float v;
-} pose_kpt_t;
-
-typedef struct {
-    float x1;
-    float y1;
-    float x2;
-    float y2;
-    float score;
-    pose_kpt_t kpts[POSE_NUM_KEYPOINTS];
-    int valid;
-} pose_result_t;
 static aclmdlDesc *g_det_model_desc = TD_NULL;
 static uint32_t g_det_model_id = 0;
 static int g_det_enabled = 0;
 static ot_vpss_chn g_det_vpss_chn = 2;
-static aclmdlDesc *g_pose_model_desc = TD_NULL;
-static uint32_t g_pose_model_id = 0;
-static int g_pose_enabled = 0;
-static int g_pose_rgn_enable = 0;
-static ot_vpss_chn g_pose_vpss_chn = 2;
-static td_u32 g_pose_line_thick = 7;
-static int g_pose_line_auto = 1;
-static int g_pose_box_draw = 0;
-static td_bool g_pose_bbox_rgn_inited = TD_FALSE;
-static td_u32 g_pose_infer_interval = 5;
-static td_u32 g_pose_hold_ms = 300;
-static float g_pose_motion_px = 10.0f;
-static float g_pose_stable_motion_px = 12.0f;
-static float g_pose_kpt_snap_px = 8.0f;
-static float g_pose_bbox_jump_px = 28.0f;
-static float g_pose_smooth_alpha = 0.45f;
-static td_u32 g_pose_miss_max = 4;
-static td_u32 g_pose_miss_streak = 0;
-static int g_pose_clear_on_action = 0;
-static int g_pose_clear_on_swing = 1;
-static td_u32 g_pose_det_w = 224U;
-static td_u32 g_pose_det_h = 224U;
-static struct timeval g_pose_valid_tv;
-static td_bool g_pose_valid_ts_set = TD_FALSE;
-static int g_pose_ch1_only = 1;
-static int g_replay_live_ring = 0;
-static td_s32 g_replay_src_chn = -1;
-static td_bool g_pose_rgn_inited = TD_FALSE;
-static td_bool g_pose_edge_was_show[POSE_SKELETON_EDGES];
-static td_bool g_pose_kpt_show[POSE_NUM_KEYPOINTS];
-static pose_result_t g_pose_result;
+aclmdlDesc *g_pose_model_desc = TD_NULL;
+uint32_t g_pose_model_id = 0;
+int g_pose_enabled = 0;
+int g_pose_rgn_enable = 0;
+ot_vpss_chn g_pose_vpss_chn = 2;
+td_u32 g_pose_line_thick = 7;
+int g_pose_line_auto = 1;
+int g_pose_box_draw = 0;
+td_bool g_pose_bbox_rgn_inited = TD_FALSE;
+td_u32 g_pose_infer_interval = 5;
+td_u32 g_pose_hold_ms = 300;
+float g_pose_motion_px = 10.0f;
+float g_pose_stable_motion_px = 12.0f;
+float g_pose_kpt_snap_px = 8.0f;
+float g_pose_bbox_jump_px = 28.0f;
+float g_pose_smooth_alpha = 0.45f;
+td_u32 g_pose_miss_max = 4;
+td_u32 g_pose_miss_streak = 0;
+int g_pose_clear_on_action = 0;
+int g_pose_clear_on_swing = 1;
+td_u32 g_pose_det_w = 224U;
+td_u32 g_pose_det_h = 224U;
+struct timeval g_pose_valid_tv;
+td_bool g_pose_valid_ts_set = TD_FALSE;
+int g_pose_ch1_only = 1;
+int g_replay_live_ring = 0;
+td_s32 g_replay_src_chn = -1;
+td_bool g_pose_rgn_inited = TD_FALSE;
+td_bool g_pose_edge_was_show[POSE_SKELETON_EDGES];
+td_bool g_pose_kpt_show[POSE_NUM_KEYPOINTS];
+pose_result_t g_pose_result;
 static int g_action_cls_hist[YOLO_ACTION_HIST_LEN];
 static float g_action_hist_score[YOLO_ACTION_HIST_LEN];
 static int g_action_hist_len = 0;
@@ -394,6 +358,8 @@ typedef struct {
     float vel_inst_peak;
     float vel_ema_peak;
     int active_frames;
+    int quiet_frames;       /* 低速连续帧，用于触发后重新武装 */
+    td_bool armed;          /* 未武装时忽略新的运动窗，防一次挥拍拆成两次 */
     td_u64 last_swing_ms;
     int swing_seq;
     int last_swing_cls;
@@ -414,6 +380,7 @@ static void yolo_swing_reset(td_void)
     (void)memset_s(&g_swing, sizeof(g_swing), 0, sizeof(g_swing));
     g_swing.last_swing_cls = -1;
     g_swing.locked_cls = -1;
+    g_swing.armed = TD_TRUE;
 }
 
 static float yolo_swing_conf_thres(td_void)
@@ -764,6 +731,29 @@ static void yolo_swing_on_frame(const yolo_det_t *motion_src, int motion_cnt,
     yolo_swing_lock_cls(cls_src, cls_cnt, stable_cls, score, stable);
     g_swing.prev_stable = stable;
 
+    /* 触发后需连续低速若干帧才重新武装，避免一次挥拍被拆成抬手+出拍两次 */
+    if (g_swing.armed != TD_TRUE) {
+        if (g_swing.vel_ema <= g_swing_vel_thres * 0.40f && vel <= g_swing_vel_thres * 0.40f) {
+            g_swing.quiet_frames++;
+            if (g_swing.quiet_frames >= YOLO_SWING_QUIET_FRAMES) {
+                g_swing.armed = TD_TRUE;
+                g_swing.quiet_frames = 0;
+                g_swing.active_frames = 0;
+                g_swing.vel_inst_peak = 0.0f;
+                g_swing.vel_ema_peak = 0.0f;
+                yolo_swing_phase_reset();
+            }
+        } else {
+            g_swing.quiet_frames = 0;
+        }
+        if ((frame_idx % 90) == 0 && motion_cnt > 0) {
+            printf("yolo swing dbg frame=%u vel=%.3f ema=%.3f peak=%.3f active=%d armed=0 quiet=%d\n",
+                frame_idx, vel, g_swing.vel_ema, g_swing.vel_inst_peak, g_swing.active_frames,
+                g_swing.quiet_frames);
+        }
+        return;
+    }
+
     if (g_swing.vel_ema > g_swing_vel_thres || vel > g_swing_vel_thres) {
         if (g_swing.active_frames == 0) {
             yolo_swing_phase_reset();
@@ -780,56 +770,66 @@ static void yolo_swing_on_frame(const yolo_det_t *motion_src, int motion_cnt,
         }
     }
 
-    /* 挥拍：运动峰回落 + 挥拍窗口内多帧类别加权；触发与类别分无关 */
-    if (g_swing.active_frames >= YOLO_SWING_MIN_ACTIVE_FRAMES &&
-        (g_swing.vel_inst_peak >= g_swing_peak_thres || g_swing.vel_ema_peak >= g_swing_peak_thres) &&
-        g_swing.vel_ema < g_swing_vel_thres * 0.95f) {
-        int cls_fire = -1;
-        float sc_fire = 0.0f;
+    /* 挥拍：持续运动 + 足够峰值 + 明显回落；抬手短暂停顿不触发 */
+    {
+        float need_peak = g_swing_peak_thres;
+        float margin_peak = g_swing_vel_thres * YOLO_SWING_PEAK_MARGIN;
         float vp = (g_swing.vel_inst_peak > g_swing.vel_ema_peak) ?
             g_swing.vel_inst_peak : g_swing.vel_ema_peak;
+        if (margin_peak > need_peak) {
+            need_peak = margin_peak;
+        }
 
-        cls_fire = yolo_swing_phase_pick_cls(&sc_fire);
-        if (cls_fire < 0 && g_swing.locked_cls >= 0 && g_swing.locked_cls != YOLO_SERVE_CLASS_ID) {
-            cls_fire = g_swing.locked_cls;
-            sc_fire = g_swing.locked_score;
-        }
-        if (cls_fire < 0 && stable_cls >= 0 && stable_cls != YOLO_SERVE_CLASS_ID) {
-            cls_fire = stable_cls;
-            sc_fire = score;
-        }
-        if (cls_fire == YOLO_SERVE_CLASS_ID) {
-            int alt = yolo_swing_phase_pick_best_non_serve(&sc_fire);
-            if (alt >= 0) {
-                cls_fire = alt;
+        if (g_swing.active_frames >= YOLO_SWING_MIN_ACTIVE_FRAMES &&
+            vp >= need_peak &&
+            g_swing.vel_ema < g_swing_vel_thres * YOLO_SWING_DROP_RATIO) {
+            int cls_fire = -1;
+            float sc_fire = 0.0f;
+
+            cls_fire = yolo_swing_phase_pick_cls(&sc_fire);
+            if (cls_fire < 0 && g_swing.locked_cls >= 0 && g_swing.locked_cls != YOLO_SERVE_CLASS_ID) {
+                cls_fire = g_swing.locked_cls;
+                sc_fire = g_swing.locked_score;
             }
-        }
-        if (cls_fire < 0 && motion_cnt > 0 && motion_src != TD_NULL &&
-            motion_src[0].cls_id >= 0 && motion_src[0].cls_id < YOLO_NUM_CLASSES &&
-            motion_src[0].cls_id != YOLO_SERVE_CLASS_ID) {
-            cls_fire = motion_src[0].cls_id;
-            sc_fire = motion_src[0].score;
-        }
-        yolo_swing_fire(cls_fire, sc_fire, ts_ms, "motion_peak", vp);
-        g_swing.active_frames = 0;
-        g_swing.vel_inst_peak = 0.0f;
-        g_swing.vel_ema_peak = 0.0f;
-        g_swing.locked_cls = -1;
-        g_swing.locked_score = 0.0f;
-        yolo_swing_phase_reset();
-    } else if (g_swing.vel_ema <= g_swing_vel_thres * 0.35f) {
-        if (g_swing.active_frames > 0) {
-            g_swing.active_frames--;
-        }
-        if (g_swing.active_frames == 0) {
+            if (cls_fire < 0 && stable_cls >= 0 && stable_cls != YOLO_SERVE_CLASS_ID) {
+                cls_fire = stable_cls;
+                sc_fire = score;
+            }
+            if (cls_fire == YOLO_SERVE_CLASS_ID) {
+                int alt = yolo_swing_phase_pick_best_non_serve(&sc_fire);
+                if (alt >= 0) {
+                    cls_fire = alt;
+                }
+            }
+            if (cls_fire < 0 && motion_cnt > 0 && motion_src != TD_NULL &&
+                motion_src[0].cls_id >= 0 && motion_src[0].cls_id < YOLO_NUM_CLASSES &&
+                motion_src[0].cls_id != YOLO_SERVE_CLASS_ID) {
+                cls_fire = motion_src[0].cls_id;
+                sc_fire = motion_src[0].score;
+            }
+            yolo_swing_fire(cls_fire, sc_fire, ts_ms, "motion_peak", vp);
+            g_swing.active_frames = 0;
+            g_swing.vel_inst_peak = 0.0f;
+            g_swing.vel_ema_peak = 0.0f;
+            g_swing.locked_cls = -1;
+            g_swing.locked_score = 0.0f;
+            g_swing.armed = TD_FALSE;
+            g_swing.quiet_frames = 0;
             yolo_swing_phase_reset();
+        } else if (g_swing.vel_ema <= g_swing_vel_thres * 0.35f) {
+            if (g_swing.active_frames > 0) {
+                g_swing.active_frames--;
+            }
+            if (g_swing.active_frames == 0) {
+                yolo_swing_phase_reset();
+            }
+            g_swing.vel_inst_peak *= 0.70f;
+            g_swing.vel_ema_peak *= 0.70f;
         }
-        g_swing.vel_inst_peak *= 0.70f;
-        g_swing.vel_ema_peak *= 0.70f;
     }
 
     if ((frame_idx % 90) == 0 && motion_cnt > 0) {
-        printf("yolo swing dbg frame=%u vel=%.3f ema=%.3f peak=%.3f active=%d cls=%d stable=%d\n",
+        printf("yolo swing dbg frame=%u vel=%.3f ema=%.3f peak=%.3f active=%d cls=%d stable=%d armed=1\n",
             frame_idx, vel, g_swing.vel_ema, g_swing.vel_inst_peak, g_swing.active_frames,
             (cls_cnt > 0 && cls_src != TD_NULL) ? cls_src[0].cls_id : -1, stable);
     }
@@ -1100,23 +1100,6 @@ static int g_ab_uv_mul_q8 = 256;  /* UV multiplier in Q8 (256=1.0) */
 static float g_decode_conf_thres = YOLO_CONF_THRES;
 static float g_decode_iou_thres = YOLO_IOU_THRES;
 
-static int yolo_env_get_int_default(const char *key, int defv)
-{
-    const char *e = getenv(key);
-    if (e == TD_NULL || e[0] == '\0') {
-        return defv;
-    }
-    return atoi(e);
-}
-
-static float yolo_env_get_float_default(const char *key, float defv)
-{
-    const char *e = getenv(key);
-    if (e == TD_NULL || e[0] == '\0') {
-        return defv;
-    }
-    return (float)atof(e);
-}
 
 static void yolo_ab_init_once(void)
 {
@@ -1155,8 +1138,8 @@ static void yolo_tune_init_once(void)
             (void)fclose(ef);
         }
     }
-    g_yolo_box_draw = yolo_env_get_int_default("WIDGET_YOLO_BOX_DRAW", 0);
-    g_yolo_show_max = yolo_env_get_int_default("WIDGET_YOLO_SHOW_MAX", g_yolo_box_draw ? 1 : 0);
+    g_yolo_box_draw = vio_ai_env_get_int_default("WIDGET_YOLO_BOX_DRAW", 0);
+    g_yolo_show_max = vio_ai_env_get_int_default("WIDGET_YOLO_SHOW_MAX", g_yolo_box_draw ? 1 : 0);
     if (g_yolo_box_draw == 0) {
         g_yolo_show_max = 0;
     } else {
@@ -1167,28 +1150,28 @@ static void yolo_tune_init_once(void)
             g_yolo_show_max = YOLO_RGN_MAX;
         }
     }
-    g_yolo_smooth_alpha = yolo_env_get_float_default("WIDGET_YOLO_SMOOTH", YOLO_SMOOTH_ALPHA);
+    g_yolo_smooth_alpha = vio_ai_env_get_float_default("WIDGET_YOLO_SMOOTH", YOLO_SMOOTH_ALPHA);
     if (g_yolo_smooth_alpha < 0.08f) {
         g_yolo_smooth_alpha = 0.08f;
     }
     if (g_yolo_smooth_alpha > 0.90f) {
         g_yolo_smooth_alpha = 0.90f;
     }
-    g_yolo_smooth_size_alpha = yolo_env_get_float_default("WIDGET_YOLO_SMOOTH_SIZE", YOLO_SMOOTH_SIZE_ALPHA);
+    g_yolo_smooth_size_alpha = vio_ai_env_get_float_default("WIDGET_YOLO_SMOOTH_SIZE", YOLO_SMOOTH_SIZE_ALPHA);
     if (g_yolo_smooth_size_alpha < 0.05f) {
         g_yolo_smooth_size_alpha = 0.05f;
     }
     if (g_yolo_smooth_size_alpha > g_yolo_smooth_alpha) {
         g_yolo_smooth_size_alpha = g_yolo_smooth_alpha;
     }
-    g_yolo_track_iou = yolo_env_get_float_default("WIDGET_YOLO_TRACK_IOU", YOLO_TRACK_IOU_THRES);
+    g_yolo_track_iou = vio_ai_env_get_float_default("WIDGET_YOLO_TRACK_IOU", YOLO_TRACK_IOU_THRES);
     if (g_yolo_track_iou < 0.05f) {
         g_yolo_track_iou = 0.05f;
     }
     if (g_yolo_track_iou > 0.80f) {
         g_yolo_track_iou = 0.80f;
     }
-    g_yolo_hold_max = yolo_env_get_int_default("WIDGET_YOLO_HOLD", YOLO_HOLD_FRAMES_MAX);
+    g_yolo_hold_max = vio_ai_env_get_int_default("WIDGET_YOLO_HOLD", YOLO_HOLD_FRAMES_MAX);
     if (g_yolo_hold_max < 1) {
         g_yolo_hold_max = 1;
     }
@@ -1196,7 +1179,7 @@ static void yolo_tune_init_once(void)
         g_yolo_hold_max = 15;
     }
     {
-        int disp_fps = yolo_env_get_int_default("WIDGET_YOLO_DISP_FPS", YOLO_DISPLAY_FPS);
+        int disp_fps = vio_ai_env_get_int_default("WIDGET_YOLO_DISP_FPS", YOLO_DISPLAY_FPS);
         if (disp_fps < 10) {
             disp_fps = 10;
         }
@@ -1208,93 +1191,93 @@ static void yolo_tune_init_once(void)
             g_yolo_disp_interval_ms = 10;
         }
     }
-    g_yolo_vpss_get_ms = yolo_env_get_int_default("WIDGET_YOLO_FRAME_MS", YOLO_VPSS_GET_FRAME_MS);
+    g_yolo_vpss_get_ms = vio_ai_env_get_int_default("WIDGET_YOLO_FRAME_MS", YOLO_VPSS_GET_FRAME_MS);
     if (g_yolo_vpss_get_ms < 10) {
         g_yolo_vpss_get_ms = 10;
     }
     if (g_yolo_vpss_get_ms > 200) {
         g_yolo_vpss_get_ms = 200;
     }
-    g_yolo_display_smooth = yolo_env_get_float_default("WIDGET_YOLO_DISPLAY_SMOOTH", YOLO_DISPLAY_SMOOTH_ALPHA);
+    g_yolo_display_smooth = vio_ai_env_get_float_default("WIDGET_YOLO_DISPLAY_SMOOTH", YOLO_DISPLAY_SMOOTH_ALPHA);
     if (g_yolo_display_smooth < 0.08f) {
         g_yolo_display_smooth = 0.08f;
     }
     if (g_yolo_display_smooth > 0.90f) {
         g_yolo_display_smooth = 0.90f;
     }
-    g_yolo_use_disp_thread = yolo_env_get_int_default("WIDGET_YOLO_DISP_THREAD", 1);
+    g_yolo_use_disp_thread = vio_ai_env_get_int_default("WIDGET_YOLO_DISP_THREAD", 1);
     if (g_yolo_box_draw == 0 && g_yolo_show_max == 0) {
         g_yolo_use_disp_thread = 0;
     }
-    g_pose_line_thick = (td_u32)yolo_env_get_int_default("WIDGET_POSE_LINE_THICK", 7);
+    g_pose_line_thick = (td_u32)vio_ai_env_get_int_default("WIDGET_POSE_LINE_THICK", 7);
     if (g_pose_line_thick < 2U) {
         g_pose_line_thick = 2U;
     }
     if (g_pose_line_thick > 8U) {
         g_pose_line_thick = 8U;
     }
-    g_pose_line_auto = yolo_env_get_int_default("WIDGET_POSE_LINE_AUTO", 1);
-    g_pose_box_draw = yolo_env_get_int_default("WIDGET_POSE_BOX_DRAW", 0);
-    g_pose_infer_interval = (td_u32)yolo_env_get_int_default("WIDGET_POSE_INTERVAL", 2);
+    g_pose_line_auto = vio_ai_env_get_int_default("WIDGET_POSE_LINE_AUTO", 1);
+    g_pose_box_draw = vio_ai_env_get_int_default("WIDGET_POSE_BOX_DRAW", 0);
+    g_pose_infer_interval = (td_u32)vio_ai_env_get_int_default("WIDGET_POSE_INTERVAL", 2);
     if (g_pose_infer_interval < 2U) {
         g_pose_infer_interval = 2U;
     }
-    g_pose_hold_ms = (td_u32)yolo_env_get_int_default("WIDGET_POSE_HOLD_MS", 120);
+    g_pose_hold_ms = (td_u32)vio_ai_env_get_int_default("WIDGET_POSE_HOLD_MS", 120);
     if (g_pose_hold_ms < 40U) {
         g_pose_hold_ms = 40U;
     }
     if (g_pose_hold_ms > 800U) {
         g_pose_hold_ms = 800U;
     }
-    g_pose_motion_px = yolo_env_get_float_default("WIDGET_POSE_MOTION_PX", 16.0f);
+    g_pose_motion_px = vio_ai_env_get_float_default("WIDGET_POSE_MOTION_PX", 16.0f);
     if (g_pose_motion_px < 4.0f) {
         g_pose_motion_px = 4.0f;
     }
     if (g_pose_motion_px > 80.0f) {
         g_pose_motion_px = 80.0f;
     }
-    g_pose_stable_motion_px = yolo_env_get_float_default("WIDGET_POSE_STABLE_PX", 12.0f);
+    g_pose_stable_motion_px = vio_ai_env_get_float_default("WIDGET_POSE_STABLE_PX", 12.0f);
     if (g_pose_stable_motion_px < 4.0f) {
         g_pose_stable_motion_px = 4.0f;
     }
     if (g_pose_stable_motion_px > 40.0f) {
         g_pose_stable_motion_px = 40.0f;
     }
-    g_pose_kpt_snap_px = yolo_env_get_float_default("WIDGET_POSE_KPT_SNAP_PX", 8.0f);
+    g_pose_kpt_snap_px = vio_ai_env_get_float_default("WIDGET_POSE_KPT_SNAP_PX", 8.0f);
     if (g_pose_kpt_snap_px < 2.0f) {
         g_pose_kpt_snap_px = 2.0f;
     }
     if (g_pose_kpt_snap_px > 30.0f) {
         g_pose_kpt_snap_px = 30.0f;
     }
-    g_pose_miss_max = (td_u32)yolo_env_get_int_default("WIDGET_POSE_MISS_MAX", 3);
+    g_pose_miss_max = (td_u32)vio_ai_env_get_int_default("WIDGET_POSE_MISS_MAX", 3);
     if (g_pose_miss_max < 1U) {
         g_pose_miss_max = 1U;
     }
     if (g_pose_miss_max > 20U) {
         g_pose_miss_max = 20U;
     }
-    g_pose_clear_on_action = yolo_env_get_int_default("WIDGET_POSE_CLEAR_ON_ACTION", 0);
-    g_pose_clear_on_swing = yolo_env_get_int_default("WIDGET_POSE_CLEAR_ON_SWING", 1);
-    g_pose_bbox_jump_px = yolo_env_get_float_default("WIDGET_POSE_BBOX_JUMP_PX", 28.0f);
+    g_pose_clear_on_action = vio_ai_env_get_int_default("WIDGET_POSE_CLEAR_ON_ACTION", 0);
+    g_pose_clear_on_swing = vio_ai_env_get_int_default("WIDGET_POSE_CLEAR_ON_SWING", 1);
+    g_pose_bbox_jump_px = vio_ai_env_get_float_default("WIDGET_POSE_BBOX_JUMP_PX", 28.0f);
     if (g_pose_bbox_jump_px < 8.0f) {
         g_pose_bbox_jump_px = 8.0f;
     }
     if (g_pose_bbox_jump_px > 120.0f) {
         g_pose_bbox_jump_px = 120.0f;
     }
-    g_pose_smooth_alpha = yolo_env_get_float_default("WIDGET_POSE_SMOOTH_ALPHA", 0.35f);
+    g_pose_smooth_alpha = vio_ai_env_get_float_default("WIDGET_POSE_SMOOTH_ALPHA", 0.35f);
     if (g_pose_smooth_alpha < 0.10f) {
         g_pose_smooth_alpha = 0.10f;
     }
     if (g_pose_smooth_alpha > 0.90f) {
         g_pose_smooth_alpha = 0.90f;
     }
-    g_pose_ch1_only = yolo_env_get_int_default("WIDGET_POSE_CH1_ONLY", 1);
-    g_pose_rgn_enable = yolo_env_get_int_default("WIDGET_POSE_RGN", 0);
-    g_replay_live_ring = yolo_env_get_int_default("WIDGET_REPLAY_LIVE", 0);
-    g_yolo_draw_nv12 = yolo_env_get_int_default("WIDGET_YOLO_DRAW_NV12", 0);
-    g_yolo_export_action = yolo_env_get_int_default("WIDGET_YOLO_ACTION", 1);
+    g_pose_ch1_only = vio_ai_env_get_int_default("WIDGET_POSE_CH1_ONLY", 1);
+    g_pose_rgn_enable = vio_ai_env_get_int_default("WIDGET_POSE_RGN", 0);
+    g_replay_live_ring = vio_ai_env_get_int_default("WIDGET_REPLAY_LIVE", 0);
+    g_yolo_draw_nv12 = vio_ai_env_get_int_default("WIDGET_YOLO_DRAW_NV12", 0);
+    g_yolo_export_action = vio_ai_env_get_int_default("WIDGET_YOLO_ACTION", 1);
     {
         const char *conf_pct = getenv("WIDGET_YOLO_CONF_PERCENT");
         const char *conf_env = getenv("WIDGET_YOLO_CONF");
@@ -1308,7 +1291,7 @@ static void yolo_tune_init_once(void)
         } else if (conf_env != TD_NULL && conf_env[0] != '\0') {
             conf_th = (float)atof(conf_env);
         } else {
-            conf_th = yolo_env_get_float_default("WIDGET_YOLO_SCORE_THRES", YOLO_ACTION_CONF_DEFAULT);
+            conf_th = vio_ai_env_get_float_default("WIDGET_YOLO_SCORE_THRES", YOLO_ACTION_CONF_DEFAULT);
         }
         if (conf_th < 0.05f) {
             conf_th = 0.05f;
@@ -1318,23 +1301,23 @@ static void yolo_tune_init_once(void)
         }
         g_yolo_action_conf_thres = conf_th;
     }
-    g_yolo_swing_enable = yolo_env_get_int_default("WIDGET_YOLO_SWING", 1);
-    g_swing_cooldown_ms = yolo_env_get_int_default("WIDGET_YOLO_SWING_COOLDOWN_MS", YOLO_SWING_COOLDOWN_MS_DEFAULT);
-    if (g_swing_cooldown_ms < 300) {
-        g_swing_cooldown_ms = 300;
+    g_yolo_swing_enable = vio_ai_env_get_int_default("WIDGET_YOLO_SWING", 1);
+    g_swing_cooldown_ms = vio_ai_env_get_int_default("WIDGET_YOLO_SWING_COOLDOWN_MS", YOLO_SWING_COOLDOWN_MS_DEFAULT);
+    if (g_swing_cooldown_ms < 800) {
+        g_swing_cooldown_ms = 800;
     }
     if (g_swing_cooldown_ms > 5000) {
         g_swing_cooldown_ms = 5000;
     }
-    g_swing_vel_thres = yolo_env_get_float_default("WIDGET_YOLO_SWING_VEL", YOLO_SWING_VEL_THRES_DEFAULT);
-    if (g_swing_vel_thres < 0.08f) {
-        g_swing_vel_thres = 0.08f;
+    g_swing_vel_thres = vio_ai_env_get_float_default("WIDGET_YOLO_SWING_VEL", YOLO_SWING_VEL_THRES_DEFAULT);
+    if (g_swing_vel_thres < 0.12f) {
+        g_swing_vel_thres = 0.12f;
     }
     if (g_swing_vel_thres > 1.20f) {
         g_swing_vel_thres = 1.20f;
     }
-    g_swing_peak_thres = yolo_env_get_float_default("WIDGET_YOLO_SWING_PEAK", YOLO_SWING_PEAK_THRES_DEFAULT);
-    if (g_swing_peak_thres < g_swing_vel_thres) {
+    g_swing_peak_thres = vio_ai_env_get_float_default("WIDGET_YOLO_SWING_PEAK", YOLO_SWING_PEAK_THRES_DEFAULT);
+    if (g_swing_peak_thres < g_swing_vel_thres + 0.06f) {
         g_swing_peak_thres = g_swing_vel_thres + 0.08f;
     }
     if (g_swing_peak_thres > 1.50f) {
@@ -1349,7 +1332,7 @@ static void yolo_tune_init_once(void)
                 fire_floor = (float)pct / 100.0f;
             }
         } else {
-            fire_floor = yolo_env_get_float_default("WIDGET_YOLO_SWING_FIRE", YOLO_SWING_FIRE_SCORE_FLOOR);
+            fire_floor = vio_ai_env_get_float_default("WIDGET_YOLO_SWING_FIRE", YOLO_SWING_FIRE_SCORE_FLOOR);
         }
         if (fire_floor < 0.20f) {
             fire_floor = 0.20f;
@@ -1359,14 +1342,14 @@ static void yolo_tune_init_once(void)
         }
         g_swing_fire_score_floor = fire_floor;
     }
-    g_serve_phase_scale = yolo_env_get_float_default("WIDGET_YOLO_SERVE_SCALE", YOLO_SERVE_PHASE_SCALE_DEFAULT);
+    g_serve_phase_scale = vio_ai_env_get_float_default("WIDGET_YOLO_SERVE_SCALE", YOLO_SERVE_PHASE_SCALE_DEFAULT);
     if (g_serve_phase_scale < 0.01f) {
         g_serve_phase_scale = 0.01f;
     }
     if (g_serve_phase_scale > 1.0f) {
         g_serve_phase_scale = 1.0f;
     }
-    g_serve_win_ratio = yolo_env_get_float_default("WIDGET_YOLO_SERVE_WIN_RATIO", YOLO_SERVE_WIN_RATIO_DEFAULT);
+    g_serve_win_ratio = vio_ai_env_get_float_default("WIDGET_YOLO_SERVE_WIN_RATIO", YOLO_SERVE_WIN_RATIO_DEFAULT);
     if (g_serve_win_ratio < 1.2f) {
         g_serve_win_ratio = 1.2f;
     }
@@ -1409,7 +1392,7 @@ static void yolo_tune_init_once(void)
     }
 }
 
-static td_void yolo_refresh_preview_src_size(td_void)
+td_void yolo_refresh_preview_src_size(td_void)
 {
     ot_vpss_chn_attr attr;
 
@@ -1423,11 +1406,22 @@ static td_void yolo_refresh_preview_src_size(td_void)
 
 static float yolo_iou(const yolo_det_t *a, const yolo_det_t *b);
 static float yolo_track_match_score(const yolo_det_t *meas, const yolo_det_t *prev);
-static td_u32 overlay_auto_line_width(td_u32 map_w, td_u32 map_h);
-static td_u32 overlay_corner_bracket_len(td_u32 map_w, td_u32 map_h, td_u32 thick);
 static td_u32 yolo_class_color_rgn(int cls_id);
 static td_bool sample_vio_ai_try_attach_target(ot_vpss_grp grp, ot_vpss_chn chn,
     td_bool *depth_changed, td_u32 *old_depth);
+static td_u32 overlay_auto_line_width(td_u32 map_w, td_u32 map_h)
+{
+    td_u32 lw;
+
+    lw = (td_u32)(((float)map_w + (float)map_h) * 0.5f * 0.003f + 0.5f);
+    if (lw < 2U) {
+        lw = 2U;
+    }
+    if (lw > 8U) {
+        lw = 8U;
+    }
+    return lw;
+}
 
 static float yolo_dynamic_show_thres(void)
 {
@@ -1482,7 +1476,7 @@ static td_void yolo_rgn_deinit(td_void)
 }
 
 /* Region 挂在 VO 时，以 VO 通道实际矩形为准（与 camera_pipe_vo_set_window 一致） */
-static td_void yolo_rgn_refresh_vo_rect(td_void)
+td_void yolo_rgn_refresh_vo_rect(td_void)
 {
     const char *vo_layer_env = getenv("WIDGET_VO_LAYER");
     td_u32 vo_layer = (vo_layer_env != NULL && vo_layer_env[0] != '\0') ?
@@ -1539,7 +1533,7 @@ static td_void yolo_rgn_refresh_vo_rect(td_void)
 }
 
 /* Region 挂在 VPSS 预览通道 ch0 时，用传感器输出分辨率 */
-static td_void yolo_rgn_refresh_vpss_preview_rect(td_void)
+td_void yolo_rgn_refresh_vpss_preview_rect(td_void)
 {
     ot_vpss_chn_attr attr;
     (td_void)memset_s(&attr, sizeof(attr), 0, sizeof(attr));
@@ -1604,7 +1598,7 @@ static td_s32 yolo_rgn_try_init(const ot_mpp_chn *chn, td_bool create_boxes)
     return TD_SUCCESS;
 }
 
-static td_void yolo_rgn_lazy_init(td_void)
+td_void yolo_rgn_lazy_init(td_void)
 {
     td_s32 ret;
     ot_mpp_chn chn;
@@ -1847,59 +1841,11 @@ static td_void yolo_rgn_update(td_u32 img_w, td_u32 img_h)
     yolo_rgn_update_dets(g_draw_dets, g_draw_det_cnt, img_w, img_h);
 }
 
-/* YOLOv8 pose skeleton (COCO 17 keypoints, 0-indexed) */
-static const td_u8 g_pose_skeleton[POSE_SKELETON_EDGES][2] = {
-    {15, 13}, {13, 11}, {16, 14}, {14, 12}, {11, 12},
-    {5, 11}, {6, 12}, {5, 6}, {5, 7}, {6, 8},
-    {7, 9}, {8, 10}, {1, 2}, {0, 1}, {0, 2},
-    {1, 3}, {2, 4}, {3, 5}, {4, 6}
-};
+/* YOLOv8 pose skeleton moved to vio_ai_pose.c */
 
-/* Ultralytics plotting + YOLOs-CPP drawing.hpp，适配海思 RGN 0xRRGGBB */
 #define RGN_RGB(r, g, b) (((td_u32)(r) << 16) | ((td_u32)(g) << 8) | (td_u32)(b))
-#define RGN_FROM_BGR(b, g, r) RGN_RGB(r, g, b)
 
-static const td_u32 g_pose_palette[20] = {
-    RGN_FROM_BGR(0, 128, 255), RGN_FROM_BGR(51, 153, 255), RGN_FROM_BGR(102, 178, 255),
-    RGN_FROM_BGR(0, 230, 230), RGN_FROM_BGR(255, 153, 255), RGN_FROM_BGR(255, 204, 153),
-    RGN_FROM_BGR(255, 102, 255), RGN_FROM_BGR(255, 51, 255), RGN_FROM_BGR(255, 178, 102),
-    RGN_FROM_BGR(255, 153, 51), RGN_FROM_BGR(153, 153, 255), RGN_FROM_BGR(102, 102, 255),
-    RGN_FROM_BGR(51, 51, 255), RGN_FROM_BGR(153, 255, 153), RGN_FROM_BGR(102, 255, 102),
-    RGN_FROM_BGR(51, 255, 51), RGN_FROM_BGR(0, 255, 0), RGN_FROM_BGR(255, 0, 0),
-    RGN_FROM_BGR(0, 0, 255), RGN_FROM_BGR(255, 255, 255)
-};
-
-/* YOLOs-CPP drawPoseSkeleton limbColorIndices（COCO 19 边） */
-static const td_u8 g_pose_limb_color_idx[POSE_SKELETON_EDGES] = {
-    9, 9, 9, 9, 7, 7, 7, 0, 0, 0, 0, 0, 16, 16, 16, 16, 16, 16, 0
-};
-
-static td_u32 overlay_auto_line_width(td_u32 map_w, td_u32 map_h)
-{
-    td_u32 lw;
-
-    /* ultralytics Annotator: max(round(sum(shape)/2 * 0.003), 2)，海思 LINE 上限 8 */
-    lw = (td_u32)(((float)map_w + (float)map_h) * 0.5f * 0.003f + 0.5f);
-    if (lw < 2U) {
-        lw = 2U;
-    }
-    if (lw > 8U) {
-        lw = 8U;
-    }
-    return lw;
-}
-
-static td_u32 overlay_effective_line_width(td_u32 map_w, td_u32 map_h, td_u32 env_thick)
-{
-    td_u32 auto_lw = overlay_auto_line_width(map_w, map_h);
-
-    if (g_pose_line_auto != 0) {
-        return auto_lw;
-    }
-    return env_thick;
-}
-
-static td_u32 overlay_corner_bracket_len(td_u32 map_w, td_u32 map_h, td_u32 thick)
+td_u32 overlay_corner_bracket_len(td_u32 map_w, td_u32 map_h, td_u32 thick)
 {
     td_u32 ref;
     td_u32 len = thick * 4U;
@@ -1927,450 +1873,6 @@ static td_u32 yolo_class_color_rgn(int cls_id)
         cls_id = 0;
     }
     return palette[cls_id % (int)(sizeof(palette) / sizeof(palette[0]))];
-}
-
-static td_u32 pose_limb_color(td_u32 edge_idx)
-{
-    (void)edge_idx;
-    return POSE_LINE_COLOR;
-}
-
-static td_void pose_rgn_hide_all_edges(td_void)
-{
-    int i;
-
-    if (g_pose_rgn_inited != TD_TRUE) {
-        return;
-    }
-    for (i = 0; i < POSE_SKELETON_EDGES; i++) {
-        ot_rgn_handle h = POSE_RGN_LINE_BASE + i;
-        ot_rgn_chn_attr chn_attr;
-        ot_rgn_line_chn_attr *line;
-
-        (td_void)memset_s(&chn_attr, sizeof(chn_attr), 0, sizeof(chn_attr));
-        chn_attr.type = OT_RGN_LINE;
-        chn_attr.is_show = TD_FALSE;
-        line = &chn_attr.attr.line_chn;
-        line->thick = 2U;
-        line->color = POSE_LINE_COLOR;
-        line->points[0].x = 0;
-        line->points[0].y = 0;
-        line->points[1].x = 0;
-        line->points[1].y = 0;
-        (td_void)ss_mpi_rgn_set_display_attr(h, &g_rgn_chn, &chn_attr);
-    }
-    (td_void)memset_s(g_pose_edge_was_show, sizeof(g_pose_edge_was_show), 0, sizeof(g_pose_edge_was_show));
-}
-
-static td_void pose_rgn_hide_bbox(td_void)
-{
-    ot_rgn_chn_attr chn_attr;
-    ot_rgn_corner_rect_chn_attr *cr;
-
-    if (g_pose_bbox_rgn_inited != TD_TRUE) {
-        return;
-    }
-    (td_void)memset_s(&chn_attr, sizeof(chn_attr), 0, sizeof(chn_attr));
-    chn_attr.type = OT_RGN_CORNER_RECTEX;
-    chn_attr.is_show = TD_FALSE;
-    cr = &chn_attr.attr.corner_rectex_chn;
-    cr->layer = 0;
-    (td_void)ss_mpi_rgn_set_display_attr(POSE_RGN_BBOX_HANDLE, &g_rgn_chn, &chn_attr);
-}
-
-static td_s32 pose_rgn_try_init_bbox(const ot_mpp_chn *chn)
-{
-    ot_rgn_handle h = POSE_RGN_BBOX_HANDLE;
-    ot_rgn_attr attr;
-    ot_rgn_chn_attr chn_attr;
-    ot_rgn_corner_rect_chn_attr *cr;
-    td_s32 ret;
-
-    if (g_pose_box_draw == 0 || chn == TD_NULL) {
-        return TD_SUCCESS;
-    }
-    (td_void)memset_s(&attr, sizeof(attr), 0, sizeof(attr));
-    (td_void)memset_s(&chn_attr, sizeof(chn_attr), 0, sizeof(chn_attr));
-    attr.type = OT_RGN_CORNER_RECTEX;
-    ret = ss_mpi_rgn_create(h, &attr);
-    if ((ret != TD_SUCCESS) && (ret != OT_ERR_RGN_EXIST)) {
-        return ret;
-    }
-    chn_attr.is_show = TD_FALSE;
-    chn_attr.type = OT_RGN_CORNER_RECTEX;
-    cr = &chn_attr.attr.corner_rectex_chn;
-    cr->layer = 0;
-    cr->corner_rect.thick = 4;
-    cr->corner_rect.hor_len = 16;
-    cr->corner_rect.ver_len = 16;
-    cr->corner_rect_attr.color = g_pose_palette[0];
-    cr->corner_rect_attr.corner_rect_type = OT_CORNER_RECT_TYPE_FULL_LINE;
-    ret = ss_mpi_rgn_attach_to_chn(h, chn, &chn_attr);
-    if ((ret != TD_SUCCESS) && (ret != OT_ERR_RGN_EXIST)) {
-        return ret;
-    }
-    g_pose_bbox_rgn_inited = TD_TRUE;
-    return TD_SUCCESS;
-}
-
-static td_void pose_rgn_update_bbox(const pose_result_t *pose, td_u32 map_w, td_u32 map_h,
-    td_u32 off_x, td_u32 off_y, float sx, float sy, td_u32 thick, td_u32 bracket_len)
-{
-    ot_rgn_chn_attr chn_attr;
-    ot_rgn_corner_rect_chn_attr *cr;
-    int x1;
-    int y1;
-    int x2;
-    int y2;
-    int w;
-    int hgt;
-    td_u32 lim_w;
-    td_u32 lim_h;
-
-    if (g_pose_box_draw == 0 || g_pose_bbox_rgn_inited != TD_TRUE) {
-        return;
-    }
-    (td_void)memset_s(&chn_attr, sizeof(chn_attr), 0, sizeof(chn_attr));
-    chn_attr.type = OT_RGN_CORNER_RECTEX;
-    cr = &chn_attr.attr.corner_rectex_chn;
-    cr->layer = 0;
-    cr->corner_rect.thick = thick;
-    cr->corner_rect.hor_len = bracket_len;
-    cr->corner_rect.ver_len = bracket_len;
-    cr->corner_rect_attr.color = g_pose_palette[0];
-    cr->corner_rect_attr.corner_rect_type = OT_CORNER_RECT_TYPE_FULL_LINE;
-
-    if (pose == TD_NULL || pose->valid == 0) {
-        chn_attr.is_show = TD_FALSE;
-        (td_void)ss_mpi_rgn_set_display_attr(POSE_RGN_BBOX_HANDLE, &g_rgn_chn, &chn_attr);
-        return;
-    }
-
-    x1 = (int)(pose->x1 * sx + 0.5f) + (int)off_x;
-    y1 = (int)(pose->y1 * sy + 0.5f) + (int)off_y;
-    x2 = (int)(pose->x2 * sx + 0.5f) + (int)off_x;
-    y2 = (int)(pose->y2 * sy + 0.5f) + (int)off_y;
-    w = x2 - x1;
-    hgt = y2 - y1;
-    lim_w = map_w + off_x;
-    lim_h = map_h + off_y;
-    if (w < 8) {
-        w = 8;
-    }
-    if (hgt < 8) {
-        hgt = 8;
-    }
-    if (x1 < (int)off_x) {
-        x1 = (int)off_x;
-    }
-    if (y1 < (int)off_y) {
-        y1 = (int)off_y;
-    }
-    if ((td_u32)(x1 + w) > lim_w) {
-        w = (int)lim_w - x1;
-    }
-    if ((td_u32)(y1 + hgt) > lim_h) {
-        hgt = (int)lim_h - y1;
-    }
-    chn_attr.is_show = TD_TRUE;
-    cr->corner_rect.rect.x = x1;
-    cr->corner_rect.rect.y = y1;
-    cr->corner_rect.rect.width = (td_u32)w;
-    cr->corner_rect.rect.height = (td_u32)hgt;
-    (td_void)ss_mpi_rgn_set_display_attr(POSE_RGN_BBOX_HANDLE, &g_rgn_chn, &chn_attr);
-}
-
-static td_void pose_rgn_deinit(td_void)
-{
-    int i;
-    if (g_pose_rgn_inited != TD_TRUE && g_pose_bbox_rgn_inited != TD_TRUE) {
-        return;
-    }
-    for (i = 0; i < POSE_SKELETON_EDGES; i++) {
-        ot_rgn_handle h = POSE_RGN_LINE_BASE + i;
-        (td_void)ss_mpi_rgn_detach_from_chn(h, &g_rgn_chn);
-        (td_void)ss_mpi_rgn_destroy(h);
-    }
-    if (g_pose_bbox_rgn_inited == TD_TRUE) {
-        (td_void)ss_mpi_rgn_detach_from_chn(POSE_RGN_BBOX_HANDLE, &g_rgn_chn);
-        (td_void)ss_mpi_rgn_destroy(POSE_RGN_BBOX_HANDLE);
-        g_pose_bbox_rgn_inited = TD_FALSE;
-    }
-    g_pose_rgn_inited = TD_FALSE;
-}
-
-static td_s32 pose_rgn_try_init(const ot_mpp_chn *chn)
-{
-    int i;
-    td_s32 ret;
-
-    if (chn == TD_NULL) {
-        return TD_FAILURE;
-    }
-    for (i = 0; i < POSE_SKELETON_EDGES; i++) {
-        ot_rgn_handle h = POSE_RGN_LINE_BASE + i;
-        ot_rgn_attr attr;
-        ot_rgn_chn_attr chn_attr;
-        ot_rgn_line_chn_attr *line;
-
-        (td_void)memset_s(&attr, sizeof(attr), 0, sizeof(attr));
-        (td_void)memset_s(&chn_attr, sizeof(chn_attr), 0, sizeof(chn_attr));
-        attr.type = OT_RGN_LINE;
-        ret = ss_mpi_rgn_create(h, &attr);
-        if ((ret != TD_SUCCESS) && (ret != OT_ERR_RGN_EXIST)) {
-            return ret;
-        }
-        chn_attr.is_show = TD_FALSE;
-        chn_attr.type = OT_RGN_LINE;
-        line = &chn_attr.attr.line_chn;
-        line->thick = overlay_effective_line_width(g_rgn_disp_w, g_rgn_disp_h, g_pose_line_thick);
-        line->color = pose_limb_color((td_u32)i);
-        line->points[0].x = 0;
-        line->points[0].y = 0;
-        line->points[1].x = 8;
-        line->points[1].y = 8;
-        ret = ss_mpi_rgn_attach_to_chn(h, chn, &chn_attr);
-        if ((ret != TD_SUCCESS) && (ret != OT_ERR_RGN_EXIST)) {
-            return ret;
-        }
-    }
-    g_pose_rgn_inited = TD_TRUE;
-    return TD_SUCCESS;
-}
-
-static td_void pose_rgn_lazy_init(td_void)
-{
-    td_s32 ret;
-
-    if (g_pose_rgn_enable == 0) {
-        return;
-    }
-    if (g_pose_rgn_inited == TD_TRUE) {
-        return;
-    }
-    yolo_rgn_lazy_init();
-    if (g_rgn_chn_ready != TD_TRUE) {
-        return;
-    }
-    ret = pose_rgn_try_init(&g_rgn_chn);
-    if (ret == TD_SUCCESS) {
-        (td_void)pose_rgn_try_init_bbox(&g_rgn_chn);
-        printf("pose rgn: attach %d skeleton lines (handle %d..%d)%s\n",
-            POSE_SKELETON_EDGES, POSE_RGN_LINE_BASE, POSE_RGN_LINE_BASE + POSE_SKELETON_EDGES - 1,
-            (g_pose_box_draw != 0) ? " + person bbox" : "");
-    } else {
-        printf("pose rgn: init failed ret=0x%x\n", (td_u32)ret);
-    }
-}
-
-static td_void pose_kpt_update_vis_state(const pose_result_t *pose, float vis_base)
-{
-    int i;
-    float vis_on;
-    float vis_off;
-
-    vis_on = vis_base + 0.06f;
-    vis_off = vis_base - 0.04f;
-    if (vis_off < 0.05f) {
-        vis_off = 0.05f;
-    }
-
-    for (i = 0; i < POSE_NUM_KEYPOINTS; i++) {
-        if (pose == TD_NULL || pose->valid == 0) {
-            g_pose_kpt_show[i] = TD_FALSE;
-            continue;
-        }
-        if (pose->kpts[i].v >= vis_on) {
-            g_pose_kpt_show[i] = TD_TRUE;
-        } else if (pose->kpts[i].v <= vis_off) {
-            g_pose_kpt_show[i] = TD_FALSE;
-        }
-    }
-}
-
-static td_void pose_rgn_update_skeleton(const pose_result_t *pose, td_u32 img_w, td_u32 img_h)
-{
-    int i;
-    td_u32 net_w;
-    td_u32 net_h;
-    td_u32 map_w;
-    td_u32 map_h;
-    td_u32 off_x = 0;
-    td_u32 off_y = 0;
-    float sx;
-    float sy;
-    td_u32 line_thick;
-    td_u32 bracket_len;
-    float kpt_vis = yolo_env_get_float_default("WIDGET_POSE_KPT_VIS", 0.25f);
-
-    if (g_pose_rgn_enable == 0) {
-        return;
-    }
-    if (g_pose_rgn_inited != TD_TRUE) {
-        return;
-    }
-
-    if (g_rgn_chn.mod_id == OT_ID_VO) {
-        yolo_rgn_refresh_vo_rect();
-        map_w = g_rgn_disp_w;
-        map_h = g_rgn_disp_h;
-        off_x = g_rgn_disp_ox;
-        off_y = g_rgn_disp_oy;
-    } else {
-        yolo_rgn_refresh_vpss_preview_rect();
-        yolo_refresh_preview_src_size();
-        map_w = g_preview_src_w;
-        map_h = g_preview_src_h;
-        if (map_w < 32U || map_h < 32U) {
-            map_w = g_rgn_disp_w;
-            map_h = g_rgn_disp_h;
-        }
-    }
-
-    net_w = (img_w > 0) ? img_w : 640U;
-    net_h = (img_h > 0) ? img_h : 640U;
-    sx = (float)map_w / (float)net_w;
-    sy = (float)map_h / (float)net_h;
-    line_thick = overlay_effective_line_width(map_w, map_h, g_pose_line_thick);
-    bracket_len = overlay_corner_bracket_len(map_w, map_h, line_thick);
-
-    pose_kpt_update_vis_state(pose, kpt_vis);
-
-    for (i = 0; i < POSE_SKELETON_EDGES; i++) {
-        ot_rgn_handle h = POSE_RGN_LINE_BASE + i;
-        ot_rgn_chn_attr chn_attr;
-        ot_rgn_line_chn_attr *line;
-        td_u8 k0;
-        td_u8 k1;
-        int x0;
-        int y0;
-        int x1;
-        int y1;
-
-        (td_void)memset_s(&chn_attr, sizeof(chn_attr), 0, sizeof(chn_attr));
-        chn_attr.type = OT_RGN_LINE;
-        line = &chn_attr.attr.line_chn;
-        line->thick = line_thick;
-        line->color = POSE_LINE_COLOR;
-
-        if (pose != TD_NULL && pose->valid != 0) {
-            k0 = g_pose_skeleton[i][0];
-            k1 = g_pose_skeleton[i][1];
-            /* 两端关键点均可见（带滞后），静止时不因置信度抖动而闪烁 */
-            if (k0 < POSE_NUM_KEYPOINTS && k1 < POSE_NUM_KEYPOINTS &&
-                g_pose_kpt_show[k0] != TD_FALSE && g_pose_kpt_show[k1] != TD_FALSE) {
-                x0 = (int)(pose->kpts[k0].x * sx + 0.5f) + (int)off_x;
-                y0 = (int)(pose->kpts[k0].y * sy + 0.5f) + (int)off_y;
-                x1 = (int)(pose->kpts[k1].x * sx + 0.5f) + (int)off_x;
-                y1 = (int)(pose->kpts[k1].y * sy + 0.5f) + (int)off_y;
-                if (x0 < (int)off_x) {
-                    x0 = (int)off_x;
-                }
-                if (y0 < (int)off_y) {
-                    y0 = (int)off_y;
-                }
-                if (x1 < (int)off_x) {
-                    x1 = (int)off_x;
-                }
-                if (y1 < (int)off_y) {
-                    y1 = (int)off_y;
-                }
-                chn_attr.is_show = TD_TRUE;
-                line->points[0].x = (td_u32)x0;
-                line->points[0].y = (td_u32)y0;
-                line->points[1].x = (td_u32)x1;
-                line->points[1].y = (td_u32)y1;
-                g_pose_edge_was_show[i] = TD_TRUE;
-            } else {
-                if (g_pose_edge_was_show[i] == TD_TRUE) {
-                    chn_attr.is_show = TD_FALSE;
-                    line->points[0].x = 0;
-                    line->points[0].y = 0;
-                    line->points[1].x = 0;
-                    line->points[1].y = 0;
-                    g_pose_edge_was_show[i] = TD_FALSE;
-                } else {
-                    continue;
-                }
-            }
-        } else {
-            if (g_pose_edge_was_show[i] == TD_TRUE) {
-                chn_attr.is_show = TD_FALSE;
-                line->points[0].x = 0;
-                line->points[0].y = 0;
-                line->points[1].x = 0;
-                line->points[1].y = 0;
-                g_pose_edge_was_show[i] = TD_FALSE;
-            } else {
-                continue;
-            }
-        }
-        (td_void)ss_mpi_rgn_set_display_attr(h, &g_rgn_chn, &chn_attr);
-    }
-
-    if (g_pose_box_draw != 0) {
-        if (g_pose_bbox_rgn_inited != TD_TRUE) {
-            (td_void)pose_rgn_try_init_bbox(&g_rgn_chn);
-        }
-        pose_rgn_update_bbox(pose, map_w, map_h, off_x, off_y, sx, sy, line_thick, bracket_len);
-    }
-}
-
-static td_void pose_rgn_redraw_cached(td_void)
-{
-    if (g_pose_rgn_enable == 0 || g_pose_enabled == 0 || g_pose_result.valid == 0) {
-        return;
-    }
-    pose_rgn_lazy_init();
-    if (g_pose_rgn_inited != TD_TRUE) {
-        return;
-    }
-    pose_rgn_update_skeleton(&g_pose_result, g_pose_det_w, g_pose_det_h);
-}
-
-static td_void pose_rgn_clear_now(td_void)
-{
-    if (g_pose_enabled == 0) {
-        return;
-    }
-    g_pose_miss_streak = 0;
-    (td_void)memset_s(&g_pose_result, sizeof(g_pose_result), 0, sizeof(g_pose_result));
-    (td_void)memset_s(g_pose_kpt_show, sizeof(g_pose_kpt_show), 0, sizeof(g_pose_kpt_show));
-    g_pose_valid_ts_set = TD_FALSE;
-    if (g_pose_rgn_enable == 0) {
-        return;
-    }
-    if (g_pose_rgn_inited == TD_TRUE) {
-        pose_rgn_hide_all_edges();
-        if (g_pose_box_draw != 0) {
-            pose_rgn_hide_bbox();
-        }
-    }
-}
-
-static td_void pose_rgn_expire_if_stale(td_void)
-{
-    struct timeval now;
-    td_u32 age_ms;
-
-    if (g_pose_rgn_enable == 0 || g_pose_enabled == 0 || g_pose_rgn_inited != TD_TRUE) {
-        return;
-    }
-    if (g_pose_result.valid == 0 || g_pose_valid_ts_set == TD_FALSE) {
-        return;
-    }
-    if (gettimeofday(&now, TD_NULL) != 0) {
-        return;
-    }
-    if (now.tv_sec > g_pose_valid_tv.tv_sec) {
-        age_ms = (td_u32)((now.tv_sec - g_pose_valid_tv.tv_sec) * 1000 +
-            (now.tv_usec - g_pose_valid_tv.tv_usec) / 1000);
-    } else {
-        age_ms = (td_u32)((now.tv_usec - g_pose_valid_tv.tv_usec) / 1000);
-    }
-    if (age_ms >= g_pose_hold_ms) {
-        pose_rgn_clear_now();
-    }
 }
 
 static td_void *yolo_display_thread(td_void *arg)
@@ -3058,7 +2560,7 @@ static float yolo_sigmoid(float x)
     }
 }
 
-static float yolo_prob(float x)
+float yolo_prob(float x)
 {
     if ((x >= 0.0f) && (x <= 1.0f)) {
         return x;
@@ -3107,7 +2609,7 @@ static void yolo_sort_desc(yolo_det_t *dets, int det_cnt)
     }
 }
 
-static int yolo_nms(yolo_det_t *src, int src_cnt, yolo_det_t *dst, int max_dst, float iou_thres)
+int yolo_nms(yolo_det_t *src, int src_cnt, yolo_det_t *dst, int max_dst, float iou_thres)
 {
     int keep_cnt = 0;
     int i;
@@ -3291,271 +2793,6 @@ static td_bool yolo_get_model_input_wh(td_u32 *net_w, td_u32 *net_h)
     return TD_TRUE;
 }
 
-static td_bool pixel_format_is_nv21(td_u32 pixel_format)
-{
-#ifdef OT_PIXEL_FORMAT_YVU_SEMIPLANAR_420
-    if (pixel_format == (td_u32)OT_PIXEL_FORMAT_YVU_SEMIPLANAR_420) {
-        return TD_TRUE;
-    }
-#endif
-    return TD_FALSE;
-}
-
-static td_bool hit_replay_src_is_nv21(td_u32 pixel_format)
-{
-    td_s32 force = yolo_env_get_int_default("WIDGET_REPLAY_SRC_NV21", -1);
-
-    if (force == 0) {
-        return TD_FALSE;
-    }
-    if (force == 1) {
-        return TD_TRUE;
-    }
-    /* attach AI 通道 NV12；专用回放 ch3 等为 NV21 */
-    if (g_replay_src_chn < 0) {
-        return TD_FALSE;
-    }
-    if ((ot_vpss_chn)g_replay_src_chn == g_attach_chn) {
-        return TD_FALSE;
-    }
-    if (pixel_format_is_nv21(pixel_format) == TD_TRUE) {
-        return TD_TRUE;
-    }
-#ifdef OT_PIXEL_FORMAT_YUV_SEMIPLANAR_420
-    if (pixel_format == (td_u32)OT_PIXEL_FORMAT_YUV_SEMIPLANAR_420) {
-        return TD_FALSE;
-    }
-#endif
-    /* VPSS 预览通道默认 NV21；AI 640 通道经 AIPP 前多为 NV12 */
-    return (g_replay_src_chn >= 0 && (ot_vpss_chn)g_replay_src_chn != g_attach_chn) ? TD_TRUE : TD_FALSE;
-}
-
-static void resize_yuv420sp_nn(const unsigned char *src, td_u32 src_w, td_u32 src_h, td_u32 src_stride_y, td_u32 src_stride_uv,
-    unsigned char *dst, td_u32 dst_w, td_u32 dst_h, td_bool src_is_nv21, td_bool dst_is_nv21)
-{
-    td_u32 y;
-    td_u32 x;
-    unsigned char *dst_y = dst;
-    unsigned char *dst_uv = dst + (size_t)dst_w * dst_h;
-    const unsigned char *src_y = src;
-    const unsigned char *src_uv = src + (size_t)src_stride_y * src_h;
-
-    for (y = 0; y < dst_h; y++) {
-        td_u32 sy = (td_u32)(((uint64_t)y * src_h) / dst_h);
-        const unsigned char *src_row = src_y + (size_t)sy * src_stride_y;
-        unsigned char *dst_row = dst_y + (size_t)y * dst_w;
-        for (x = 0; x < dst_w; x++) {
-            td_u32 sx = (td_u32)(((uint64_t)x * src_w) / dst_w);
-            dst_row[x] = src_row[sx];
-        }
-    }
-
-    for (y = 0; y < dst_h / 2; y++) {
-        td_u32 sy = (td_u32)(((uint64_t)y * (src_h / 2)) / (dst_h / 2));
-        const unsigned char *src_row = src_uv + (size_t)sy * src_stride_uv;
-        unsigned char *dst_row = dst_uv + (size_t)y * dst_w;
-        for (x = 0; x < dst_w; x += 2) {
-            td_u32 sx = (td_u32)(((uint64_t)x * src_w) / dst_w);
-            unsigned char su;
-            unsigned char sv;
-            sx &= ~1U;
-            if (sx + 1 >= src_w) {
-                sx = (src_w >= 2) ? (src_w - 2) : 0;
-            }
-            if (src_is_nv21 == TD_TRUE) {
-                sv = src_row[sx];
-                su = src_row[sx + 1];
-            } else {
-                su = src_row[sx];
-                sv = src_row[sx + 1];
-            }
-            if (dst_is_nv21 == TD_TRUE) {
-                dst_row[x] = sv;
-                dst_row[x + 1] = su;
-            } else {
-                dst_row[x] = su;
-                dst_row[x + 1] = sv;
-            }
-        }
-    }
-}
-
-static unsigned char bilerp_u8(unsigned char p00, unsigned char p01, unsigned char p10, unsigned char p11, unsigned int fx, unsigned int fy)
-{
-    /* fx,fy in [0,255] */
-    unsigned int w00 = (255U - fx) * (255U - fy);
-    unsigned int w01 = fx * (255U - fy);
-    unsigned int w10 = (255U - fx) * fy;
-    unsigned int w11 = fx * fy;
-    unsigned int v = w00 * p00 + w01 * p01 + w10 * p10 + w11 * p11;
-    v = (v + (255U * 255U / 2U)) / (255U * 255U);
-    if (v > 255U) v = 255U;
-    return (unsigned char)v;
-}
-
-static void resize_y_plane_bilinear(const unsigned char *src_y, td_u32 src_w, td_u32 src_h, td_u32 src_stride,
-    unsigned char *dst_y, td_u32 dst_w, td_u32 dst_h)
-{
-    td_u32 y;
-    td_u32 x;
-    unsigned int scale_x = (dst_w > 1) ? ((src_w - 1U) << 8) / (dst_w - 1U) : 0;
-    unsigned int scale_y = (dst_h > 1) ? ((src_h - 1U) << 8) / (dst_h - 1U) : 0;
-
-    for (y = 0; y < dst_h; y++) {
-        unsigned int sy8 = y * scale_y;
-        td_u32 sy = (td_u32)(sy8 >> 8);
-        unsigned int fy = sy8 & 0xffU;
-        td_u32 sy1 = (sy + 1U < src_h) ? (sy + 1U) : sy;
-        const unsigned char *row0 = src_y + (size_t)sy * src_stride;
-        const unsigned char *row1 = src_y + (size_t)sy1 * src_stride;
-        unsigned char *drow = dst_y + (size_t)y * dst_w;
-        for (x = 0; x < dst_w; x++) {
-            unsigned int sx8 = x * scale_x;
-            td_u32 sx = (td_u32)(sx8 >> 8);
-            unsigned int fx = sx8 & 0xffU;
-            td_u32 sx1 = (sx + 1U < src_w) ? (sx + 1U) : sx;
-            drow[x] = bilerp_u8(row0[sx], row0[sx1], row1[sx], row1[sx1], fx, fy);
-        }
-    }
-}
-
-static void resize_uv_bilinear(const unsigned char *src_uv, td_u32 src_w, td_u32 src_h, td_u32 src_stride,
-    unsigned char *dst_uv, td_u32 dst_w, td_u32 dst_h, td_bool src_is_nv21, td_bool dst_is_nv21)
-{
-    /* UV plane has size (w x h/2), but chroma samples are on grid (w/2 x h/2) */
-    td_u32 dst_ch = dst_h / 2;
-    td_u32 src_ch = src_h / 2;
-    td_u32 x;
-    td_u32 y;
-    td_u32 src_cw = (src_w / 2);
-    td_u32 dst_cw = (dst_w / 2);
-    unsigned int scale_x = (dst_cw > 1) ? ((src_cw - 1U) << 8) / (dst_cw - 1U) : 0;
-    unsigned int scale_y = (dst_ch > 1) ? ((src_ch - 1U) << 8) / (dst_ch - 1U) : 0;
-
-    for (y = 0; y < dst_ch; y++) {
-        unsigned int sy8 = y * scale_y;
-        td_u32 sy = (td_u32)(sy8 >> 8);
-        unsigned int fy = sy8 & 0xffU;
-        td_u32 sy1 = (sy + 1U < src_ch) ? (sy + 1U) : sy;
-        const unsigned char *row0 = src_uv + (size_t)sy * src_stride;
-        const unsigned char *row1 = src_uv + (size_t)sy1 * src_stride;
-        unsigned char *drow = dst_uv + (size_t)y * dst_w;
-        for (x = 0; x < dst_cw; x++) {
-            unsigned int sx8 = x * scale_x;
-            td_u32 sx = (td_u32)(sx8 >> 8);
-            unsigned int fx = sx8 & 0xffU;
-            td_u32 sx1 = (sx + 1U < src_cw) ? (sx + 1U) : sx;
-
-            /* Read u/v at chroma sample position (sx, sy) -> byte offset 2*sx */
-            td_u32 o00 = (sx << 1);
-            td_u32 o01 = (sx1 << 1);
-            unsigned char u00, v00, u01, v01, u10, v10, u11, v11;
-            if (src_is_nv21 == TD_TRUE) {
-                v00 = row0[o00]; u00 = row0[o00 + 1];
-                v01 = row0[o01]; u01 = row0[o01 + 1];
-                v10 = row1[o00]; u10 = row1[o00 + 1];
-                v11 = row1[o01]; u11 = row1[o01 + 1];
-            } else {
-                u00 = row0[o00]; v00 = row0[o00 + 1];
-                u01 = row0[o01]; v01 = row0[o01 + 1];
-                u10 = row1[o00]; v10 = row1[o00 + 1];
-                u11 = row1[o01]; v11 = row1[o01 + 1];
-            }
-
-            {
-                unsigned char u = bilerp_u8(u00, u01, u10, u11, fx, fy);
-                unsigned char v = bilerp_u8(v00, v01, v10, v11, fx, fy);
-                td_u32 doff = (x << 1);
-                if (dst_is_nv21 == TD_TRUE) {
-                    drow[doff] = v;
-                    drow[doff + 1] = u;
-                } else {
-                    drow[doff] = u;
-                    drow[doff + 1] = v;
-                }
-            }
-        }
-    }
-}
-
-static void resize_yuv420sp_bilinear(const unsigned char *src, td_u32 src_w, td_u32 src_h, td_u32 src_stride_y, td_u32 src_stride_uv,
-    unsigned char *dst, td_u32 dst_w, td_u32 dst_h, td_bool src_is_nv21, td_bool dst_is_nv21)
-{
-    unsigned char *dst_y = dst;
-    unsigned char *dst_uv = dst + (size_t)dst_w * dst_h;
-    const unsigned char *src_y = src;
-    const unsigned char *src_uv = src + (size_t)src_stride_y * src_h;
-    resize_y_plane_bilinear(src_y, src_w, src_h, src_stride_y, dst_y, dst_w, dst_h);
-    resize_uv_bilinear(src_uv, src_w, src_h, src_stride_uv, dst_uv, dst_w, dst_h, src_is_nv21, dst_is_nv21);
-}
-
-static void fill_nv21(unsigned char *dst, td_u32 w, td_u32 h, unsigned char yv, unsigned char uv)
-{
-    size_t y_sz = (size_t)w * h;
-    size_t uv_sz = y_sz / 2;
-    (void)memset(dst, yv, y_sz);
-    (void)memset(dst + y_sz, uv, uv_sz);
-}
-
-static td_bool resize_yuv420sp_letterbox(const unsigned char *src, td_u32 src_w, td_u32 src_h, td_u32 src_stride_y, td_u32 src_stride_uv,
-    unsigned char *dst, td_u32 dst_w, td_u32 dst_h, td_bool src_is_nv21, td_bool dst_is_nv21)
-{
-    td_u32 scaled_w;
-    td_u32 scaled_h;
-    td_u32 off_x;
-    td_u32 off_y;
-    unsigned char *tmp = TD_NULL;
-    td_u32 y;
-
-    if ((src == TD_NULL) || (dst == TD_NULL) || (src_w == 0) || (src_h == 0) || (dst_w == 0) || (dst_h == 0)) {
-        return TD_FALSE;
-    }
-
-    {
-        float r_w = (float)dst_w / (float)src_w;
-        float r_h = (float)dst_h / (float)src_h;
-        float r = (r_w < r_h) ? r_w : r_h;
-        if (r <= 0.0f) {
-            return TD_FALSE;
-        }
-        scaled_w = (td_u32)lroundf((double)((float)src_w * r));
-        scaled_h = (td_u32)lroundf((double)((float)src_h * r));
-    }
-    if (scaled_w < 2) scaled_w = 2;
-    if (scaled_h < 2) scaled_h = 2;
-    scaled_w &= ~1U;
-    scaled_h &= ~1U;
-    if (scaled_w > dst_w) scaled_w = dst_w & ~1U;
-    if (scaled_h > dst_h) scaled_h = dst_h & ~1U;
-
-    off_x = (dst_w - scaled_w) / 2;
-    off_y = (dst_h - scaled_h) / 2;
-    off_x &= ~1U;
-    off_y &= ~1U;
-
-    fill_nv21(dst, dst_w, dst_h, 114, 128);
-
-    tmp = (unsigned char *)malloc((size_t)scaled_w * scaled_h * 3 / 2);
-    if (tmp == TD_NULL) {
-        return TD_FALSE;
-    }
-
-    resize_yuv420sp_bilinear(src, src_w, src_h, src_stride_y, src_stride_uv, tmp, scaled_w, scaled_h, src_is_nv21, dst_is_nv21);
-
-    for (y = 0; y < scaled_h; y++) {
-        unsigned char *dst_row = dst + (size_t)(off_y + y) * dst_w + off_x;
-        const unsigned char *src_row = tmp + (size_t)y * scaled_w;
-        (void)memcpy(dst_row, src_row, scaled_w);
-    }
-    for (y = 0; y < scaled_h / 2; y++) {
-        unsigned char *dst_row = dst + (size_t)dst_w * dst_h + (size_t)(off_y / 2 + y) * dst_w + off_x;
-        const unsigned char *src_row = tmp + (size_t)scaled_w * scaled_h + (size_t)y * scaled_w;
-        (void)memcpy(dst_row, src_row, scaled_w);
-    }
-
-    free(tmp);
-    return TD_TRUE;
-}
 
 static void yolo_try_dump_nv21_once(const unsigned char *nv21, td_u32 w, td_u32 h)
 {
@@ -3919,7 +3156,7 @@ static td_bool prepare_model_input_rgb_fp32_from_nv12(const ot_video_frame_info 
         free(lb_bgr);
         return TD_FALSE;
     }
-    src_is_nv21 = pixel_format_is_nv21((td_u32)frame_info->video_frame.pixel_format);
+    src_is_nv21 = vio_ai_pixel_format_is_nv21((td_u32)frame_info->video_frame.pixel_format);
     if (s_uv_mode_fixed < 0) {
         float target_r = 0.3289f;
         float target_g = 0.4374f;
@@ -4035,7 +3272,7 @@ static td_bool prepare_model_input_from_nv12(const ot_video_frame_info *frame_in
     }
 
     {
-        td_bool src_is_nv21 = pixel_format_is_nv21((td_u32)frame_info->video_frame.pixel_format);
+        td_bool src_is_nv21 = vio_ai_pixel_format_is_nv21((td_u32)frame_info->video_frame.pixel_format);
         td_bool dst_is_nv21 = (g_ab_feed_nv12 != 0) ? TD_FALSE : TD_TRUE;
         if ((frame_info->video_frame.width == model_w) && (frame_info->video_frame.height == model_h)) {
             /* VPSS already gives 640x640: keep pixels untouched, only unify UV order if needed. */
@@ -4120,7 +3357,7 @@ static td_bool prepare_model_input_from_nv12(const ot_video_frame_info *frame_in
                 }
             }
 #endif
-            if (resize_yuv420sp_letterbox((const unsigned char *)frame_ptr,
+            if (vio_ai_resize_yuv420sp_letterbox((const unsigned char *)frame_ptr,
                 frame_info->video_frame.width,
                 frame_info->video_frame.height,
                 frame_info->video_frame.stride[0],
@@ -4135,7 +3372,7 @@ static td_bool prepare_model_input_from_nv12(const ot_video_frame_info *frame_in
             }
         } else {
             if (g_ab_bilinear != 0) {
-                resize_yuv420sp_bilinear((const unsigned char *)frame_ptr,
+                vio_ai_resize_yuv420sp_bilinear((const unsigned char *)frame_ptr,
                     frame_info->video_frame.width,
                     frame_info->video_frame.height,
                     frame_info->video_frame.stride[0],
@@ -4452,130 +3689,7 @@ static int yolo_decode(const float *out_data, size_t out_float_num, int net_w, i
     return det_cnt;
 }
 
-static void draw_box_y_plane(unsigned char *y, td_u32 stride, td_u32 img_w, td_u32 img_h,
-    int x1, int y1, int x2, int y2, unsigned char v, int thick)
-{
-    int x;
-    int yy;
-    int t;
-    if (x1 < 0) x1 = 0;
-    if (y1 < 0) y1 = 0;
-    if (x2 >= (int)img_w) x2 = (int)img_w - 1;
-    if (y2 >= (int)img_h) y2 = (int)img_h - 1;
-    if ((x2 <= x1) || (y2 <= y1)) {
-        return;
-    }
-    if (thick < 1) {
-        thick = 1;
-    }
-    for (t = 0; t < thick; t++) {
-        int ty1 = y1 + t;
-        int ty2 = y2 - t;
-        int tx1 = x1 + t;
-        int tx2 = x2 - t;
-        if ((ty1 >= (int)img_h) || (ty2 < 0) || (tx1 >= (int)img_w) || (tx2 < 0)) {
-            break;
-        }
-        if (ty1 < 0) ty1 = 0;
-        if (ty2 >= (int)img_h) ty2 = (int)img_h - 1;
-        if (tx1 < 0) tx1 = 0;
-        if (tx2 >= (int)img_w) tx2 = (int)img_w - 1;
-        for (x = tx1; x <= tx2; x++) {
-            y[ty1 * stride + x] = v;
-            y[ty2 * stride + x] = v;
-        }
-        for (yy = ty1; yy <= ty2; yy++) {
-            y[yy * stride + tx1] = v;
-            y[yy * stride + tx2] = v;
-        }
-    }
-}
 
-static void draw_line_y_plane(unsigned char *y, td_u32 stride, td_u32 img_w, td_u32 img_h,
-    int x0, int y0, int x1, int y1, unsigned char v, int thick)
-{
-    int dx;
-    int dy;
-    int steps;
-    int i;
-    int t;
-    int half;
-
-    if (y == TD_NULL || img_w == 0 || img_h == 0) {
-        return;
-    }
-    if (thick < 1) {
-        thick = 1;
-    }
-    dx = x1 - x0;
-    dy = y1 - y0;
-    steps = (dx >= 0 ? dx : -dx);
-    if ((dy >= 0 ? dy : -dy) > steps) {
-        steps = (dy >= 0 ? dy : -dy);
-    }
-    if (steps <= 0) {
-        steps = 1;
-    }
-    half = thick / 2;
-    for (i = 0; i <= steps; i++) {
-        int px = x0 + (dx * i) / steps;
-        int py = y0 + (dy * i) / steps;
-        for (t = -half; t <= half; t++) {
-            int xx = px + t;
-            int yy = py + t;
-            if (xx >= 0 && yy >= 0 && (td_u32)xx < img_w && (td_u32)yy < img_h) {
-                y[(td_u32)yy * stride + (td_u32)xx] = v;
-            }
-        }
-    }
-}
-
-static td_void pose_stamp_on_replay_nv12_ex(unsigned char *nv12, td_u32 dst_w, td_u32 dst_h, td_u32 stride,
-    const pose_result_t *pose_in)
-{
-    pose_result_t pose;
-    float sx;
-    float sy;
-    float kpt_vis;
-    int i;
-
-    if (nv12 == TD_NULL || pose_in == TD_NULL || pose_in->valid == 0 ||
-        g_pose_det_w == 0U || g_pose_det_h == 0U) {
-        return;
-    }
-    pose = *pose_in;
-    sx = (float)dst_w / (float)g_pose_det_w;
-    sy = (float)dst_h / (float)g_pose_det_h;
-    kpt_vis = yolo_env_get_float_default("WIDGET_POSE_KPT_VIS", 0.25f);
-    for (i = 0; i < POSE_SKELETON_EDGES; i++) {
-        td_u8 k0 = g_pose_skeleton[i][0];
-        td_u8 k1 = g_pose_skeleton[i][1];
-        int x0;
-        int y0;
-        int x1;
-        int y1;
-
-        if (k0 >= POSE_NUM_KEYPOINTS || k1 >= POSE_NUM_KEYPOINTS) {
-            continue;
-        }
-        if (pose.kpts[k0].v < kpt_vis || pose.kpts[k1].v < kpt_vis) {
-            continue;
-        }
-        x0 = (int)(pose.kpts[k0].x * sx + 0.5f);
-        y0 = (int)(pose.kpts[k0].y * sy + 0.5f);
-        x1 = (int)(pose.kpts[k1].x * sx + 0.5f);
-        y1 = (int)(pose.kpts[k1].y * sy + 0.5f);
-        draw_line_y_plane(nv12, stride, dst_w, dst_h, x0, y0, x1, y1, 180, 2);
-    }
-}
-
-static td_void pose_stamp_on_replay_nv12(unsigned char *nv12, td_u32 dst_w, td_u32 dst_h, td_u32 stride)
-{
-    if (g_pose_enabled == 0 || g_pose_result.valid == 0) {
-        return;
-    }
-    pose_stamp_on_replay_nv12_ex(nv12, dst_w, dst_h, stride, &g_pose_result);
-}
 
 static void draw_dets_on_nv12(unsigned char *nv12, td_u32 stride, td_u32 img_w, td_u32 img_h)
 {
@@ -4590,11 +3704,11 @@ static void draw_dets_on_nv12(unsigned char *nv12, td_u32 stride, td_u32 img_w, 
         int y1 = (int)g_draw_dets[i].y1;
         int x2 = (int)g_draw_dets[i].x2;
         int y2 = (int)g_draw_dets[i].y2;
-        draw_box_y_plane(nv12, stride, img_w, img_h, x1, y1, x2, y2, 250, thick);
+        vio_ai_draw_box_y_plane(nv12, stride, img_w, img_h, x1, y1, x2, y2, 250, thick);
     }
     if (g_draw_det_cnt > 0) {
         /* Strong visual marker: frame border when any detection exists. */
-        draw_box_y_plane(nv12, stride, img_w, img_h, 0, 0, (int)img_w - 1, (int)img_h - 1, 250, thick);
+        vio_ai_draw_box_y_plane(nv12, stride, img_w, img_h, 0, 0, (int)img_w - 1, (int)img_h - 1, 250, thick);
     }
 }
 
@@ -4808,7 +3922,7 @@ static int yolo_decode_coco_person(const float *out_data, size_t out_float_num, 
     yolo_det_t tmp[YOLO_MAX_DET];
     int cnt = 0;
     int a;
-    float conf_thres = yolo_env_get_float_default("WIDGET_YOLO_PERSON_CONF", 0.25f);
+    float conf_thres = vio_ai_env_get_float_default("WIDGET_YOLO_PERSON_CONF", 0.25f);
     const int person_feat = 4; /* YOLOv8: channel 4 = COCO class 0 (person) */
 
     if (conf_thres < 0.05f) {
@@ -4956,8 +4070,8 @@ static void yolo_postprocess_person_draw_only(const float *out_data, size_t out_
     int saved_post;
     int saved_target;
     float saved_conf;
-    float person_smooth = yolo_env_get_float_default("WIDGET_YOLO_PERSON_SMOOTH", 0.55f);
-    float person_conf = yolo_env_get_float_default("WIDGET_YOLO_PERSON_CONF", 0.25f);
+    float person_smooth = vio_ai_env_get_float_default("WIDGET_YOLO_PERSON_SMOOTH", 0.55f);
+    float person_conf = vio_ai_env_get_float_default("WIDGET_YOLO_PERSON_CONF", 0.25f);
     int det_feat = 0;
 
     (td_void)memset_s(&dims, sizeof(dims), 0, sizeof(dims));
@@ -5078,291 +4192,6 @@ static void yolo_postprocess_person_draw_only(const float *out_data, size_t out_
     }
 }
 
-static td_void pose_decode_keypoints_for_anchor(const float *out_data, int anchor, int net_w, int net_h,
-    int img_w, int img_h, pose_result_t *out)
-{
-    int k;
-    float sx;
-    float sy;
-    const int anchors = POSE_ANCHOR_NUM;
-
-    sx = (float)img_w / (float)net_w;
-    sy = (float)img_h / (float)net_h;
-    for (k = 0; k < POSE_NUM_KEYPOINTS; k++) {
-        float kx = out_data[(5 + k * 3 + 0) * anchors + anchor];
-        float ky = out_data[(5 + k * 3 + 1) * anchors + anchor];
-        float kv = out_data[(5 + k * 3 + 2) * anchors + anchor];
-        if (kx <= 2.0f && ky <= 2.0f) {
-            kx *= (float)net_w;
-            ky *= (float)net_h;
-        }
-        out->kpts[k].x = kx * sx;
-        out->kpts[k].y = ky * sy;
-        out->kpts[k].v = kv;
-    }
-}
-
-static int pose_decode_best(const float *out_data, size_t out_float_num, int net_w, int net_h,
-    int img_w, int img_h, pose_result_t *best_out)
-{
-    const int anchors = POSE_ANCHOR_NUM;
-    float conf_thres = yolo_env_get_float_default("WIDGET_POSE_CONF", 0.10f);
-    float iou_thres = yolo_env_get_float_default("WIDGET_POSE_IOU", 0.45f);
-    yolo_det_t raw[128];
-    yolo_det_t nms[8];
-    int raw_cnt = 0;
-    int nms_cnt;
-    int a;
-    int best_i = 0;
-    int anchor_idx = -1;
-
-    (void)out_float_num;
-    if (best_out == TD_NULL) {
-        return 0;
-    }
-    (td_void)memset_s(best_out, sizeof(*best_out), 0, sizeof(*best_out));
-
-    if (conf_thres < 0.05f) {
-        conf_thres = 0.05f;
-    }
-    if (iou_thres < 0.05f) {
-        iou_thres = 0.45f;
-    }
-
-    for (a = 0; a < anchors && raw_cnt < (int)(sizeof(raw) / sizeof(raw[0])); a++) {
-        float cx = out_data[0 * anchors + a];
-        float cy = out_data[1 * anchors + a];
-        float w = out_data[2 * anchors + a];
-        float h = out_data[3 * anchors + a];
-        float conf = yolo_prob(out_data[4 * anchors + a]);
-        float x1;
-        float y1;
-        float x2;
-        float y2;
-
-        if (conf < conf_thres) {
-            continue;
-        }
-        if (cx <= 2.0f && cy <= 2.0f && w <= 2.0f && h <= 2.0f) {
-            cx *= (float)net_w;
-            cy *= (float)net_h;
-            w *= (float)net_w;
-            h *= (float)net_h;
-        }
-        x1 = cx - w * 0.5f;
-        y1 = cy - h * 0.5f;
-        x2 = cx + w * 0.5f;
-        y2 = cy + h * 0.5f;
-        if ((x2 <= x1) || (y2 <= y1)) {
-            continue;
-        }
-        raw[raw_cnt].x1 = x1;
-        raw[raw_cnt].y1 = y1;
-        raw[raw_cnt].x2 = x2;
-        raw[raw_cnt].y2 = y2;
-        raw[raw_cnt].score = conf;
-        raw[raw_cnt].cls_id = a;
-        raw_cnt++;
-    }
-
-    nms_cnt = yolo_nms(raw, raw_cnt, nms, 1, iou_thres);
-    if (nms_cnt <= 0) {
-        return 0;
-    }
-
-    best_i = 0;
-    for (a = 1; a < nms_cnt; a++) {
-        if (nms[a].score > nms[best_i].score) {
-            best_i = a;
-        }
-    }
-    anchor_idx = nms[best_i].cls_id;
-    best_out->x1 = nms[best_i].x1;
-    best_out->y1 = nms[best_i].y1;
-    best_out->x2 = nms[best_i].x2;
-    best_out->y2 = nms[best_i].y2;
-    best_out->score = nms[best_i].score;
-    pose_decode_keypoints_for_anchor(out_data, anchor_idx, net_w, net_h, img_w, img_h, best_out);
-    best_out->valid = 1;
-    return 1;
-}
-
-static float pose_kpt_motion_px(const pose_result_t *prev, const pose_result_t *next)
-{
-    int i;
-    int n = 0;
-    float sum = 0.0f;
-
-    if (prev == TD_NULL || next == TD_NULL || prev->valid == 0) {
-        return 999.0f;
-    }
-    for (i = 0; i < POSE_NUM_KEYPOINTS; i++) {
-        float dx;
-        float dy;
-        if (prev->kpts[i].v < 0.20f && next->kpts[i].v < 0.20f) {
-            continue;
-        }
-        dx = next->kpts[i].x - prev->kpts[i].x;
-        dy = next->kpts[i].y - prev->kpts[i].y;
-        sum += sqrtf(dx * dx + dy * dy);
-        n++;
-    }
-    return (n > 0) ? (sum / (float)n) : 999.0f;
-}
-
-static float pose_bbox_center_shift_px(const pose_result_t *prev, const pose_result_t *next)
-{
-    float pcx;
-    float pcy;
-    float ncx;
-    float ncy;
-
-    if (prev == TD_NULL || next == TD_NULL || prev->valid == 0) {
-        return 999.0f;
-    }
-    pcx = (prev->x1 + prev->x2) * 0.5f;
-    pcy = (prev->y1 + prev->y2) * 0.5f;
-    ncx = (next->x1 + next->x2) * 0.5f;
-    ncy = (next->y1 + next->y2) * 0.5f;
-    return sqrtf((ncx - pcx) * (ncx - pcx) + (ncy - pcy) * (ncy - pcy));
-}
-
-static void pose_blend_keypoints(pose_result_t *out, const pose_result_t *prev, const pose_result_t *next, float alpha)
-{
-    int i;
-    float beta;
-
-    if (out == TD_NULL || prev == TD_NULL || next == TD_NULL) {
-        return;
-    }
-    if (alpha < 0.10f) {
-        alpha = 0.10f;
-    }
-    if (alpha > 1.0f) {
-        alpha = 1.0f;
-    }
-    beta = 1.0f - alpha;
-    *out = *next;
-    for (i = 0; i < POSE_NUM_KEYPOINTS; i++) {
-        if (prev->kpts[i].v >= 0.20f && next->kpts[i].v >= 0.20f) {
-            out->kpts[i].x = alpha * next->kpts[i].x + beta * prev->kpts[i].x;
-            out->kpts[i].y = alpha * next->kpts[i].y + beta * prev->kpts[i].y;
-            out->kpts[i].v = (next->kpts[i].v > prev->kpts[i].v) ? next->kpts[i].v : prev->kpts[i].v;
-        }
-    }
-}
-
-static void pose_apply_stabilized(pose_result_t *out, const pose_result_t *prev, const pose_result_t *meas, float motion)
-{
-    int i;
-    float alpha;
-    float beta;
-    float snap_px;
-
-    if (out == TD_NULL || prev == TD_NULL || meas == TD_NULL) {
-        return;
-    }
-    if (prev->valid == 0) {
-        *out = *meas;
-        return;
-    }
-
-    *out = *meas;
-    snap_px = g_pose_kpt_snap_px;
-
-    if (motion >= g_pose_motion_px) {
-        return;
-    }
-
-    alpha = g_pose_smooth_alpha;
-    if (motion < g_pose_stable_motion_px) {
-        alpha = g_pose_smooth_alpha * 0.40f;
-        if (alpha < 0.12f) {
-            alpha = 0.12f;
-        }
-    }
-    beta = 1.0f - alpha;
-
-    for (i = 0; i < POSE_NUM_KEYPOINTS; i++) {
-        float dx;
-        float dy;
-        float dist;
-
-        if (prev->kpts[i].v >= 0.15f && meas->kpts[i].v < 0.12f) {
-            out->kpts[i] = prev->kpts[i];
-            continue;
-        }
-        if (prev->kpts[i].v < 0.15f || meas->kpts[i].v < 0.12f) {
-            continue;
-        }
-
-        dx = meas->kpts[i].x - prev->kpts[i].x;
-        dy = meas->kpts[i].y - prev->kpts[i].y;
-        dist = sqrtf(dx * dx + dy * dy);
-        if (dist <= snap_px) {
-            out->kpts[i].x = prev->kpts[i].x;
-            out->kpts[i].y = prev->kpts[i].y;
-            out->kpts[i].v = (meas->kpts[i].v > prev->kpts[i].v) ? meas->kpts[i].v : prev->kpts[i].v;
-        } else {
-            out->kpts[i].x = alpha * meas->kpts[i].x + beta * prev->kpts[i].x;
-            out->kpts[i].y = alpha * meas->kpts[i].y + beta * prev->kpts[i].y;
-            out->kpts[i].v = (meas->kpts[i].v > prev->kpts[i].v) ? meas->kpts[i].v : prev->kpts[i].v;
-        }
-    }
-
-    if (motion < g_pose_stable_motion_px) {
-        out->x1 = alpha * meas->x1 + beta * prev->x1;
-        out->y1 = alpha * meas->y1 + beta * prev->y1;
-        out->x2 = alpha * meas->x2 + beta * prev->x2;
-        out->y2 = alpha * meas->y2 + beta * prev->y2;
-    }
-}
-
-static void pose_postprocess_and_draw(const float *out_data, size_t out_float_num, td_u32 img_w, td_u32 img_h)
-{
-    td_u32 net_w = 640U;
-    td_u32 net_h = 640U;
-    td_u32 det_w;
-    td_u32 det_h;
-    pose_result_t pose;
-    pose_result_t prev;
-
-    det_w = (img_w > 0) ? img_w : net_w;
-    det_h = (img_h > 0) ? img_h : net_h;
-    g_pose_det_w = det_w;
-    g_pose_det_h = det_h;
-    prev = g_pose_result;
-    (td_void)memset_s(&pose, sizeof(pose), 0, sizeof(pose));
-
-    if (pose_decode_best(out_data, out_float_num, (int)net_w, (int)net_h,
-            (int)det_w, (int)det_h, &pose) != 0) {
-        float motion = pose_kpt_motion_px(&prev, &pose);
-        float bbox_shift = pose_bbox_center_shift_px(&prev, &pose);
-
-        g_pose_miss_streak = 0;
-        if (gettimeofday(&g_pose_valid_tv, TD_NULL) == 0) {
-            g_pose_valid_ts_set = TD_TRUE;
-        }
-        if (prev.valid != 0 && bbox_shift >= g_pose_bbox_jump_px) {
-            if (g_pose_rgn_enable != 0) {
-                pose_rgn_hide_all_edges();
-            }
-            g_pose_result = pose;
-        } else {
-            pose_apply_stabilized(&g_pose_result, &prev, &pose, motion);
-        }
-    } else {
-        g_pose_miss_streak++;
-        if (g_pose_miss_streak >= g_pose_miss_max) {
-            pose_rgn_clear_now();
-        }
-    }
-
-    pose_rgn_lazy_init();
-    if (g_pose_rgn_enable != 0 && g_pose_result.valid != 0) {
-        pose_rgn_update_skeleton(&g_pose_result, det_w, det_h);
-    }
-}
 
 static td_s32 ai_det_load(const char *path)
 {
@@ -5395,7 +4224,7 @@ static td_s32 ai_det_load(const char *path)
     }
 
     g_det_enabled = 1;
-    g_det_vpss_chn = (ot_vpss_chn)yolo_env_get_int_default("WIDGET_YOLO_DET_CHN", 2);
+    g_det_vpss_chn = (ot_vpss_chn)vio_ai_env_get_int_default("WIDGET_YOLO_DET_CHN", 2);
     {
         aclmdlIODims idims;
         aclmdlIODims odims;
@@ -5434,7 +4263,7 @@ static td_void ai_det_unload(td_void)
     g_det_enabled = 0;
 }
 
-static td_s32 ai_infer_from_nv12(const ot_video_frame_info *frame_info);
+td_s32 ai_infer_from_nv12(const ot_video_frame_info *frame_info);
 
 static td_s32 ai_det_infer_person_only(const ot_video_frame_info *frame_info)
 {
@@ -5457,103 +4286,6 @@ static td_s32 ai_det_infer_person_only(const ot_video_frame_info *frame_info)
     return ret;
 }
 
-static td_s32 ai_pose_load(const char *path)
-{
-    td_s32 ret;
-
-    if ((path == TD_NULL) || (path[0] == '\0') || (access(path, R_OK) != 0)) {
-        printf("ai_pose: model not found: %s\n", (path != TD_NULL) ? path : "(null)");
-        return TD_FAILURE;
-    }
-
-    ret = aclmdlLoadFromFile(path, &g_pose_model_id);
-    if (ret != ACL_SUCCESS) {
-        printf("ai_pose: aclmdlLoadFromFile failed ret=%d path=%s\n", (int)ret, path);
-        return TD_FAILURE;
-    }
-
-    g_pose_model_desc = aclmdlCreateDesc();
-    if (g_pose_model_desc == TD_NULL) {
-        (td_void)aclmdlUnload(g_pose_model_id);
-        g_pose_model_id = 0;
-        return TD_FAILURE;
-    }
-    ret = aclmdlGetDesc(g_pose_model_desc, g_pose_model_id);
-    if (ret != ACL_SUCCESS) {
-        aclmdlDestroyDesc(g_pose_model_desc);
-        g_pose_model_desc = TD_NULL;
-        (td_void)aclmdlUnload(g_pose_model_id);
-        g_pose_model_id = 0;
-        return TD_FAILURE;
-    }
-
-    g_pose_enabled = 1;
-    g_pose_vpss_chn = (ot_vpss_chn)yolo_env_get_int_default("WIDGET_POSE_CHN",
-        yolo_env_get_int_default("WIDGET_YOLO_DET_CHN", 2));
-    {
-        aclmdlIODims idims;
-        aclmdlIODims odims;
-        td_u32 i;
-        (td_void)memset_s(&idims, sizeof(idims), 0, sizeof(idims));
-        (td_void)memset_s(&odims, sizeof(odims), 0, sizeof(odims));
-        printf("ai_pose: loaded %s vpss_chn=%d pose=640x640\n", path, (int)g_pose_vpss_chn);
-        if (aclmdlGetInputDims(g_pose_model_desc, 0, &idims) == ACL_SUCCESS) {
-            printf("ai_pose input dims=");
-            for (i = 0; i < idims.dimCount; i++) {
-                printf("%lld%s", (long long)idims.dims[i], (i + 1 == idims.dimCount) ? "" : "x");
-            }
-            printf("\n");
-        }
-        if (aclmdlGetOutputDims(g_pose_model_desc, 0, &odims) == ACL_SUCCESS) {
-            printf("ai_pose output dims=");
-            for (i = 0; i < odims.dimCount; i++) {
-                printf("%lld%s", (long long)odims.dims[i], (i + 1 == odims.dimCount) ? "" : "x");
-            }
-            printf(" size=%zu\n", aclmdlGetOutputSizeByIndex(g_pose_model_desc, 0));
-        }
-        if (g_pose_rgn_enable != 0) {
-            printf("ai_pose: live skeleton RGN on (WIDGET_POSE_RGN=1)\n");
-        } else {
-            printf("ai_pose: live RGN off, replay stamp only (WIDGET_POSE_RGN=0)\n");
-            pose_rgn_deinit();
-        }
-    }
-    return TD_SUCCESS;
-}
-
-static td_void ai_pose_unload(td_void)
-{
-    if (g_pose_model_desc != TD_NULL) {
-        aclmdlDestroyDesc(g_pose_model_desc);
-        g_pose_model_desc = TD_NULL;
-    }
-    if (g_pose_model_id != 0) {
-        (td_void)aclmdlUnload(g_pose_model_id);
-        g_pose_model_id = 0;
-    }
-    g_pose_enabled = 0;
-}
-
-static td_s32 ai_pose_infer(const ot_video_frame_info *frame_info)
-{
-    aclmdlDesc *saved_desc = g_model_desc;
-    uint32_t saved_id = g_model_id;
-    int saved_post = g_infer_post_mode;
-    td_s32 ret;
-
-    if ((g_pose_enabled == 0) || (g_pose_model_desc == TD_NULL) || (frame_info == TD_NULL)) {
-        return TD_FAILURE;
-    }
-
-    g_model_desc = g_pose_model_desc;
-    g_model_id = g_pose_model_id;
-    g_infer_post_mode = YOLO_INFER_POST_POSE;
-    ret = ai_infer_from_nv12(frame_info);
-    g_model_desc = saved_desc;
-    g_model_id = saved_id;
-    g_infer_post_mode = saved_post;
-    return ret;
-}
 
 static td_s32 ai_init(const char *om_path)
 {
@@ -5596,7 +4328,7 @@ static td_s32 ai_init(const char *om_path)
     }
 
     {
-        if (yolo_env_get_int_default("WIDGET_POSE_ENABLE", 0) != 0) {
+        if (vio_ai_env_get_int_default("WIDGET_POSE_ENABLE", 0) != 0) {
             const char *pose_path = getenv("WIDGET_POSE_MODEL");
             if (pose_path == TD_NULL || pose_path[0] == '\0') {
                 pose_path = "/opt/widget_ui/models/best_pose_aipp.om";
@@ -5634,7 +4366,7 @@ static td_void ai_deinit(td_void)
     (td_void)aclFinalize();
 }
 
-static td_s32 ai_infer_from_nv12(const ot_video_frame_info *frame_info)
+td_s32 ai_infer_from_nv12(const ot_video_frame_info *frame_info)
 {
     td_s32 ret;
     void *input_dev = TD_NULL;
@@ -5826,7 +4558,7 @@ static td_s32 ai_infer_from_nv12(const ot_video_frame_info *frame_info)
                     (td_u32)frame_info->video_frame.pixel_format,
                     (int)frame_info->video_frame.compress_mode,
                     (int)frame_info->video_frame.video_format,
-                    pixel_format_is_nv21((td_u32)frame_info->video_frame.pixel_format),
+                    vio_ai_pixel_format_is_nv21((td_u32)frame_info->video_frame.pixel_format),
                     net_w, net_h, (g_ab_feed_nv12 != 0) ? 0 : 1);
                 for (i = 0; i < idims.dimCount; i++) {
                     printf("%u%s", (td_u32)idims.dims[i], (i + 1 == idims.dimCount) ? "" : "x");
@@ -6220,1204 +4952,6 @@ static td_bool sample_vio_ai_recover_current_target(ot_vpss_grp grp, ot_vpss_chn
     return TD_FALSE;
 }
 
-/* ── 击球回放：环形缓冲 + 前后各 3s 导出 ── */
-#define HIT_REPLAY_W 960
-#define HIT_REPLAY_H 540
-#define HIT_REPLAY_FPS 20
-#define HIT_REPLAY_VPSS_CHN_DEFAULT 3
-#define HIT_REPLAY_SUBMIT_BYTES ((size_t)1024U * 576U * 3U / 2U)
-#define HIT_REPLAY_SEC 2
-#define HIT_REPLAY_PRE_FRAMES (HIT_REPLAY_FPS * HIT_REPLAY_SEC)
-#define HIT_REPLAY_POST_FRAMES (HIT_REPLAY_FPS * HIT_REPLAY_SEC)
-#define HIT_REPLAY_TOTAL_FRAMES (HIT_REPLAY_PRE_FRAMES + HIT_REPLAY_POST_FRAMES)
-#define HIT_REPLAY_FRAME_BYTES ((size_t)HIT_REPLAY_W * (size_t)HIT_REPLAY_H * 3 / 2)
-#define HIT_REPLAY_REQ_PATH "/tmp/.widget_replay_req"
-#define HIT_REPLAY_POSE_REQ_PATH "/tmp/.widget_replay_pose_req"
-#define HIT_REPLAY_SESSION_PATH "/tmp/.widget_replay_session"
-#define HIT_REPLAY_DEFAULT_DIR "/opt/widget_ui/replays"
-
-typedef struct {
-    unsigned char *nv12;
-    pose_result_t pose;
-    td_bool pose_valid;
-} hit_replay_slot_t;
-
-static hit_replay_slot_t g_hit_replay_ring[HIT_REPLAY_PRE_FRAMES];
-static unsigned int g_hit_replay_ring_head = 0;
-static unsigned int g_hit_replay_ring_count = 0;
-static hit_replay_slot_t g_hit_replay_export[HIT_REPLAY_TOTAL_FRAMES];
-static unsigned int g_hit_replay_export_count = 0;
-static volatile td_bool g_hit_replay_capturing_post = TD_FALSE;
-static unsigned int g_hit_replay_post_left = 0;
-static char g_hit_replay_session[96] = {0};
-static int g_hit_replay_hit_idx = 0;
-static struct timeval g_hit_replay_last_push = {0, 0};
-static td_bool g_hit_replay_inited = TD_FALSE;
-static pthread_mutex_t g_hit_replay_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-#define HIT_REPLAY_PENDING_MAX 16
-typedef struct {
-    char session[96];
-    int hit_idx;
-} hit_replay_pending_t;
-
-static hit_replay_pending_t g_hit_replay_pending[HIT_REPLAY_PENDING_MAX];
-static unsigned int g_hit_replay_pending_wr = 0;
-static unsigned int g_hit_replay_pending_rd = 0;
-static td_bool g_hit_replay_session_on = TD_FALSE;
-static struct timeval g_hit_replay_session_check = {0, 0};
-static td_s32 g_hit_replay_pose_eager_max = 3;
-
-typedef struct {
-    unsigned char *nv12;
-    td_u32 width;
-    td_u32 height;
-    td_u32 stride_y;
-    td_u32 stride_uv;
-    td_bool is_nv21;
-    td_bool pending;
-    ot_pixel_format pixel_format;
-} hit_replay_submit_t;
-
-static hit_replay_submit_t g_replay_submit;
-static pthread_mutex_t g_replay_worker_mtx = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t g_replay_worker_cv = PTHREAD_COND_INITIALIZER;
-static volatile int g_replay_worker_run = 0;
-static pthread_t g_replay_worker_tid;
-static td_bool g_replay_worker_on = TD_FALSE;
-
-static td_bool hit_replay_read_session_active(td_void)
-{
-    FILE *fp;
-    char buf[128];
-    size_t n;
-
-    fp = fopen(HIT_REPLAY_SESSION_PATH, "re");
-    if (fp == TD_NULL) {
-        return TD_FALSE;
-    }
-    if (fgets(buf, (int)sizeof(buf), fp) == TD_NULL) {
-        (void)fclose(fp);
-        return TD_FALSE;
-    }
-    (void)fclose(fp);
-    n = strlen(buf);
-    while ((n > 0U) && ((buf[n - 1U] == '\n') || (buf[n - 1U] == '\r') || (buf[n - 1U] == ' '))) {
-        buf[n - 1U] = '\0';
-        n--;
-    }
-    return (n > 0U) ? TD_TRUE : TD_FALSE;
-}
-
-static td_bool hit_replay_is_active(td_void)
-{
-    struct timeval now;
-
-    if (gettimeofday(&now, TD_NULL) != 0) {
-        return g_hit_replay_session_on;
-    }
-    if ((g_hit_replay_session_check.tv_sec == 0) ||
-        ((now.tv_sec - g_hit_replay_session_check.tv_sec) >= 2)) {
-        g_hit_replay_session_on = hit_replay_read_session_active();
-        g_hit_replay_session_check = now;
-    }
-    return g_hit_replay_session_on;
-}
-
-static td_bool hit_replay_needs_frames(td_void)
-{
-    td_bool session_on;
-    td_bool busy;
-
-    session_on = hit_replay_is_active();
-    (void)pthread_mutex_lock(&g_hit_replay_mutex);
-    busy = (g_hit_replay_capturing_post == TD_TRUE) ||
-        (g_hit_replay_pending_rd != g_hit_replay_pending_wr);
-    (void)pthread_mutex_unlock(&g_hit_replay_mutex);
-    return (session_on == TD_TRUE) || (busy == TD_TRUE);
-}
-
-static td_void hit_replay_deinit(td_void)
-{
-    unsigned int i;
-
-    if (g_hit_replay_inited != TD_TRUE) {
-        return;
-    }
-    if (g_hit_replay_capturing_post == TD_TRUE) {
-        return;
-    }
-    for (i = 0; i < HIT_REPLAY_PRE_FRAMES; i++) {
-        if (g_hit_replay_ring[i].nv12 != TD_NULL) {
-            free(g_hit_replay_ring[i].nv12);
-            g_hit_replay_ring[i].nv12 = TD_NULL;
-        }
-    }
-    for (i = 0; i < HIT_REPLAY_TOTAL_FRAMES; i++) {
-        if (g_hit_replay_export[i].nv12 != TD_NULL) {
-            free(g_hit_replay_export[i].nv12);
-            g_hit_replay_export[i].nv12 = TD_NULL;
-        }
-    }
-    g_hit_replay_ring_head = 0;
-    g_hit_replay_ring_count = 0;
-    g_hit_replay_export_count = 0;
-    g_hit_replay_inited = TD_FALSE;
-    printf("hit_replay: deinit freed buffers\n");
-}
-
-static td_s32 hit_replay_env_int(const char *name, td_s32 def, td_s32 min_v, td_s32 max_v)
-{
-    const char *v = getenv(name);
-    td_s32 n;
-
-    if ((v == TD_NULL) || (v[0] == '\0')) {
-        return def;
-    }
-    n = (td_s32)strtol(v, TD_NULL, 10);
-    if (n < min_v || n > max_v) {
-        return def;
-    }
-    return n;
-}
-
-static const char *hit_replay_dir_base(td_void)
-{
-    const char *v = getenv("WIDGET_REPLAY_DIR");
-    if ((v != TD_NULL) && (v[0] != '\0')) {
-        return v;
-    }
-    return HIT_REPLAY_DEFAULT_DIR;
-}
-
-static td_s32 hit_replay_mkdir_p(const char *path)
-{
-    char tmp[256];
-    char *p = TD_NULL;
-    size_t len;
-
-    if ((path == TD_NULL) || (path[0] == '\0')) {
-        return TD_FAILURE;
-    }
-    if (strncpy_s(tmp, sizeof(tmp), path, sizeof(tmp) - 1) != EOK) {
-        return TD_FAILURE;
-    }
-    len = strlen(tmp);
-    if ((len == 0) || (len >= sizeof(tmp))) {
-        return TD_FAILURE;
-    }
-    if (tmp[len - 1] == '/') {
-        tmp[len - 1] = '\0';
-    }
-    for (p = tmp + 1; *p != '\0'; p++) {
-        if (*p != '/') {
-            continue;
-        }
-        *p = '\0';
-        if ((mkdir(tmp, 0755) != 0) && (errno != EEXIST)) {
-            return TD_FAILURE;
-        }
-        *p = '/';
-    }
-    if ((mkdir(tmp, 0755) != 0) && (errno != EEXIST)) {
-        return TD_FAILURE;
-    }
-    return TD_SUCCESS;
-}
-
-static td_void hit_replay_init_once(td_void)
-{
-    if (g_hit_replay_inited == TD_TRUE) {
-        return;
-    }
-    g_hit_replay_inited = TD_TRUE;
-    g_hit_replay_pose_eager_max = hit_replay_env_int("WIDGET_REPLAY_POSE_EAGER_MAX", 3, 0, 32);
-    g_replay_src_chn = hit_replay_env_int("WIDGET_REPLAY_VPSS_CHN", HIT_REPLAY_VPSS_CHN_DEFAULT, -1, 3);
-    if (g_replay_live_ring != 0) {
-        printf("hit_replay: lazy alloc pre=%u post=%u @%dfps out=%ux%u src_chn=%d pose_eager=%d dir=%s\n",
-            (unsigned int)HIT_REPLAY_PRE_FRAMES, (unsigned int)HIT_REPLAY_POST_FRAMES,
-            HIT_REPLAY_FPS, (unsigned int)HIT_REPLAY_W, (unsigned int)HIT_REPLAY_H,
-            (int)g_replay_src_chn, (int)g_hit_replay_pose_eager_max, hit_replay_dir_base());
-    } else {
-        printf("hit_replay: post-only mode post=%u pose_eager=%d dir=%s (no live ring)\n",
-            (unsigned int)HIT_REPLAY_POST_FRAMES, (int)g_hit_replay_pose_eager_max, hit_replay_dir_base());
-    }
-}
-
-static td_void hit_replay_snapshot_pose(hit_replay_slot_t *slot)
-{
-    if (slot == TD_NULL) {
-        return;
-    }
-    if (g_pose_enabled != 0 && g_pose_result.valid != 0) {
-        slot->pose = g_pose_result;
-        slot->pose_valid = TD_TRUE;
-    } else {
-        (td_void)memset_s(&slot->pose, sizeof(slot->pose), 0, sizeof(slot->pose));
-        slot->pose_valid = TD_FALSE;
-    }
-}
-
-static td_void hit_replay_copy_slot(hit_replay_slot_t *dst, const hit_replay_slot_t *src)
-{
-    if ((dst == TD_NULL) || (src == TD_NULL) || (src->nv12 == TD_NULL) || (dst->nv12 == TD_NULL)) {
-        return;
-    }
-    (td_void)memcpy_s(dst->nv12, HIT_REPLAY_FRAME_BYTES, src->nv12, HIT_REPLAY_FRAME_BYTES);
-    dst->pose = src->pose;
-    dst->pose_valid = src->pose_valid;
-}
-
-static unsigned char *hit_replay_ring_slot(unsigned int idx)
-{
-    if (idx >= HIT_REPLAY_PRE_FRAMES) {
-        return TD_NULL;
-    }
-    if (g_hit_replay_ring[idx].nv12 == TD_NULL) {
-        g_hit_replay_ring[idx].nv12 = (unsigned char *)malloc(HIT_REPLAY_FRAME_BYTES);
-        if (g_hit_replay_ring[idx].nv12 == TD_NULL) {
-            printf("hit_replay: ring slot %u alloc failed\n", idx);
-        }
-    }
-    return g_hit_replay_ring[idx].nv12;
-}
-
-static unsigned char *hit_replay_export_slot(unsigned int idx)
-{
-    if (idx >= HIT_REPLAY_TOTAL_FRAMES) {
-        return TD_NULL;
-    }
-    if (g_hit_replay_export[idx].nv12 == TD_NULL) {
-        g_hit_replay_export[idx].nv12 = (unsigned char *)malloc(HIT_REPLAY_FRAME_BYTES);
-        if (g_hit_replay_export[idx].nv12 == TD_NULL) {
-            printf("hit_replay: export slot %u alloc failed\n", idx);
-        }
-    }
-    return g_hit_replay_export[idx].nv12;
-}
-
-static td_u8 hit_replay_u8_clip(int v)
-{
-    if (v < 0) {
-        return 0;
-    }
-    if (v > 255) {
-        return 255;
-    }
-    return (td_u8)v;
-}
-
-static td_void hit_replay_nv12_to_rgb24(const unsigned char *nv12, unsigned char *rgb, td_u32 w, td_u32 h, td_bool is_nv21)
-{
-    td_u32 y;
-    td_u32 x;
-    const unsigned char *y_plane = nv12;
-    const unsigned char *uv_plane = nv12 + (size_t)w * h;
-
-    for (y = 0; y < h; y++) {
-        for (x = 0; x < w; x++) {
-            int yy = (int)y_plane[y * w + x];
-            td_u32 uv_idx = (y / 2) * w + (x & ~1U);
-            int u_raw;
-            int v_raw;
-            int c;
-            int d;
-            int e;
-            int r;
-            int g;
-            int b;
-
-            if (is_nv21 == TD_TRUE) {
-                v_raw = (int)uv_plane[uv_idx];
-                u_raw = (int)uv_plane[uv_idx + 1];
-            } else {
-                u_raw = (int)uv_plane[uv_idx];
-                v_raw = (int)uv_plane[uv_idx + 1];
-            }
-            /* VPSS 输出为 BT.601 有限范围 (Y 16~235)，与 yolo_yuv420sp_to_bgr_u8 一致 */
-            c = yy - 16;
-            if (c < 0) {
-                c = 0;
-            }
-            d = u_raw - 128;
-            e = v_raw - 128;
-            r = (298 * c + 409 * e + 128) >> 8;
-            g = (298 * c - 100 * d - 208 * e + 128) >> 8;
-            b = (298 * c + 516 * d + 128) >> 8;
-            size_t o = ((size_t)y * w + x) * 3;
-            rgb[o + 0] = hit_replay_u8_clip(r);
-            rgb[o + 1] = hit_replay_u8_clip(g);
-            rgb[o + 2] = hit_replay_u8_clip(b);
-        }
-    }
-}
-
-static td_s32 hit_replay_write_ppm(const char *path, const unsigned char *nv12,
-    const pose_result_t *pose, td_bool pose_valid)
-{
-    FILE *fp = TD_NULL;
-    unsigned char *rgb = TD_NULL;
-    unsigned char *work = TD_NULL;
-    size_t rgb_sz = (size_t)HIT_REPLAY_W * (size_t)HIT_REPLAY_H * 3;
-
-    rgb = (unsigned char *)malloc(rgb_sz);
-    if (rgb == TD_NULL) {
-        return TD_FAILURE;
-    }
-    work = (unsigned char *)malloc(HIT_REPLAY_FRAME_BYTES);
-    if (work == TD_NULL) {
-        free(rgb);
-        return TD_FAILURE;
-    }
-    (td_void)memcpy_s(work, HIT_REPLAY_FRAME_BYTES, nv12, HIT_REPLAY_FRAME_BYTES);
-    if (pose_valid == TD_TRUE && pose != TD_NULL) {
-        pose_stamp_on_replay_nv12_ex(work, HIT_REPLAY_W, HIT_REPLAY_H, HIT_REPLAY_W, pose);
-    }
-    hit_replay_nv12_to_rgb24(work, rgb, HIT_REPLAY_W, HIT_REPLAY_H, TD_FALSE);
-    free(work);
-    fp = fopen(path, "wb");
-    if (fp == TD_NULL) {
-        free(rgb);
-        return TD_FAILURE;
-    }
-    (void)fprintf(fp, "P6\n%u %u\n255\n", HIT_REPLAY_W, HIT_REPLAY_H);
-    if (fwrite(rgb, 1, rgb_sz, fp) != rgb_sz) {
-        fclose(fp);
-        free(rgb);
-        return TD_FAILURE;
-    }
-    fclose(fp);
-    free(rgb);
-    return TD_SUCCESS;
-}
-
-static td_s32 hit_replay_write_raw_frame(const char *raw_dir, unsigned int idx, const unsigned char *nv12,
-    const pose_result_t *pose, td_bool pose_valid)
-{
-    char nv12_path[320];
-    char pose_path[320];
-    FILE *fp = TD_NULL;
-    td_u8 valid_flag = (pose_valid == TD_TRUE) ? 1U : 0U;
-
-    (void)snprintf_s(nv12_path, sizeof(nv12_path), sizeof(nv12_path) - 1,
-        "%s/frame_%04u.nv12", raw_dir, idx);
-    fp = fopen(nv12_path, "wb");
-    if (fp == TD_NULL) {
-        return TD_FAILURE;
-    }
-    if (fwrite(nv12, 1, HIT_REPLAY_FRAME_BYTES, fp) != HIT_REPLAY_FRAME_BYTES) {
-        fclose(fp);
-        return TD_FAILURE;
-    }
-    fclose(fp);
-
-    (void)snprintf_s(pose_path, sizeof(pose_path), sizeof(pose_path) - 1,
-        "%s/frame_%04u.pose", raw_dir, idx);
-    fp = fopen(pose_path, "wb");
-    if (fp == TD_NULL) {
-        return TD_FAILURE;
-    }
-    if (fwrite(&valid_flag, 1, 1, fp) != 1) {
-        fclose(fp);
-        return TD_FAILURE;
-    }
-    if ((valid_flag != 0U) && (pose != TD_NULL) &&
-        fwrite(pose, 1, sizeof(pose_result_t), fp) != sizeof(pose_result_t)) {
-        fclose(fp);
-        return TD_FAILURE;
-    }
-    fclose(fp);
-    return TD_SUCCESS;
-}
-
-static td_s32 hit_replay_read_raw_frame(const char *raw_dir, unsigned int idx, unsigned char *nv12,
-    pose_result_t *pose, td_bool *pose_valid)
-{
-    char nv12_path[320];
-    char pose_path[320];
-    FILE *fp = TD_NULL;
-    td_u8 valid_flag = 0;
-
-    (void)snprintf_s(nv12_path, sizeof(nv12_path), sizeof(nv12_path) - 1,
-        "%s/frame_%04u.nv12", raw_dir, idx);
-    fp = fopen(nv12_path, "rb");
-    if (fp == TD_NULL) {
-        return TD_FAILURE;
-    }
-    if (fread(nv12, 1, HIT_REPLAY_FRAME_BYTES, fp) != HIT_REPLAY_FRAME_BYTES) {
-        fclose(fp);
-        return TD_FAILURE;
-    }
-    fclose(fp);
-
-    if (pose_valid != TD_NULL) {
-        *pose_valid = TD_FALSE;
-    }
-    (void)snprintf_s(pose_path, sizeof(pose_path), sizeof(pose_path) - 1,
-        "%s/frame_%04u.pose", raw_dir, idx);
-    fp = fopen(pose_path, "rb");
-    if (fp == TD_NULL) {
-        return TD_SUCCESS;
-    }
-    if (fread(&valid_flag, 1, 1, fp) != 1) {
-        fclose(fp);
-        return TD_FAILURE;
-    }
-    if ((valid_flag != 0U) && (pose != TD_NULL) &&
-        fread(pose, 1, sizeof(pose_result_t), fp) == sizeof(pose_result_t)) {
-        if (pose_valid != TD_NULL) {
-            *pose_valid = TD_TRUE;
-        }
-    }
-    fclose(fp);
-    return TD_SUCCESS;
-}
-
-typedef struct {
-    char session[96];
-    int hit_idx;
-    unsigned int frame_count;
-    unsigned char *frames[HIT_REPLAY_TOTAL_FRAMES];
-    pose_result_t poses[HIT_REPLAY_TOTAL_FRAMES];
-    td_bool pose_valid[HIT_REPLAY_TOTAL_FRAMES];
-} hit_replay_export_job_t;
-
-typedef struct {
-    char session[96];
-    int hit_idx;
-} hit_replay_pose_job_t;
-
-static td_void *hit_replay_pose_render_thread(td_void *arg)
-{
-    hit_replay_pose_job_t *job = (hit_replay_pose_job_t *)arg;
-    char out_dir[256];
-    char raw_dir[280];
-    char meta_path[280];
-    char done_path[280];
-    char mp4_path[280];
-    char cmd[640];
-    unsigned int count = 0;
-    unsigned int i;
-    td_s32 fps;
-
-    if (job == TD_NULL) {
-        return TD_NULL;
-    }
-    fps = hit_replay_env_int("WIDGET_REPLAY_FPS", HIT_REPLAY_FPS, 8, 30);
-    (void)snprintf_s(out_dir, sizeof(out_dir), sizeof(out_dir) - 1, "%s/%s/hit_%d",
-        hit_replay_dir_base(), job->session, job->hit_idx);
-    (void)snprintf_s(raw_dir, sizeof(raw_dir), sizeof(raw_dir) - 1, "%s/raw", out_dir);
-    (void)snprintf_s(meta_path, sizeof(meta_path), sizeof(meta_path) - 1, "%s/meta.txt", out_dir);
-    {
-        FILE *mr = fopen(meta_path, "r");
-        char line[96];
-        if (mr != TD_NULL) {
-            while (fgets(line, (int)sizeof(line), mr) != TD_NULL) {
-                unsigned int c = 0;
-                if (sscanf(line, "count=%u", &c) == 1) {
-                    count = c;
-                }
-            }
-            fclose(mr);
-        }
-    }
-    if (count == 0) {
-        printf("hit_replay: pose render skip session=%s hit=%d (no meta count)\n", job->session, job->hit_idx);
-        free(job);
-        return TD_NULL;
-    }
-    for (i = 1; i <= count; i++) {
-        char frame_path[320];
-        unsigned char *nv12 = TD_NULL;
-        pose_result_t pose;
-        td_bool pose_valid = TD_FALSE;
-
-        nv12 = (unsigned char *)malloc(HIT_REPLAY_FRAME_BYTES);
-        if (nv12 == TD_NULL) {
-            break;
-        }
-        if (hit_replay_read_raw_frame(raw_dir, i, nv12, &pose, &pose_valid) != TD_SUCCESS) {
-            free(nv12);
-            break;
-        }
-        (void)snprintf_s(frame_path, sizeof(frame_path), sizeof(frame_path) - 1,
-            "%s/frame_%04u.ppm", out_dir, i);
-        (td_void)hit_replay_write_ppm(frame_path, nv12,
-            pose_valid == TD_TRUE ? &pose : TD_NULL, pose_valid);
-        free(nv12);
-    }
-    {
-        FILE *mw = fopen(meta_path, "w");
-        if (mw != TD_NULL) {
-            (void)fprintf(mw, "width=%u\nheight=%u\nfps=%d\ncount=%u\npose=1\nstage=done\n",
-                (unsigned int)HIT_REPLAY_W, (unsigned int)HIT_REPLAY_H, fps, count);
-            fclose(mw);
-        }
-    }
-    (void)snprintf_s(mp4_path, sizeof(mp4_path), sizeof(mp4_path) - 1, "%s/%s/hit_%d.mp4",
-        hit_replay_dir_base(), job->session, job->hit_idx);
-    (void)snprintf_s(cmd, sizeof(cmd), sizeof(cmd) - 1,
-        "command -v ffmpeg >/dev/null 2>&1 && ffmpeg -y -loglevel error -framerate %d "
-        "-i '%s/frame_%%04d.ppm' -c:v libx264 -pix_fmt yuv420p -crf 20 -preset fast -an '%s' 2>/dev/null",
-        fps, out_dir, mp4_path);
-    (td_void)system(cmd);
-    (void)snprintf_s(done_path, sizeof(done_path), sizeof(done_path) - 1, "%s/done.flag", out_dir);
-    {
-        FILE *done = fopen(done_path, "w");
-        if (done != TD_NULL) {
-            (void)fprintf(done, "ok\n");
-            fclose(done);
-        }
-    }
-    printf("hit_replay: pose rendered session=%s hit=%d frames=%u\n", job->session, job->hit_idx, count);
-    free(job);
-    return TD_NULL;
-}
-
-static td_void *hit_replay_export_thread(td_void *arg)
-{
-    hit_replay_export_job_t *job = (hit_replay_export_job_t *)arg;
-    char out_dir[256];
-    char raw_dir[280];
-    char meta_path[280];
-    char done_path[280];
-    char mp4_path[280];
-    char cmd[640];
-    unsigned int i;
-    td_s32 fps = hit_replay_env_int("WIDGET_REPLAY_FPS", HIT_REPLAY_FPS, 8, 30);
-    td_bool pose_eager = (job != TD_NULL && job->hit_idx > 0 &&
-        job->hit_idx <= g_hit_replay_pose_eager_max) ? TD_TRUE : TD_FALSE;
-
-    if (job == TD_NULL) {
-        return TD_NULL;
-    }
-    (void)snprintf_s(out_dir, sizeof(out_dir), sizeof(out_dir) - 1, "%s/%s/hit_%d",
-        hit_replay_dir_base(), job->session, job->hit_idx);
-    (void)hit_replay_mkdir_p(out_dir);
-    if (pose_eager == TD_TRUE) {
-        for (i = 0; i < job->frame_count; i++) {
-            char frame_path[320];
-            (void)snprintf_s(frame_path, sizeof(frame_path), sizeof(frame_path) - 1,
-                "%s/frame_%04u.ppm", out_dir, i + 1);
-            if (job->frames[i] != TD_NULL) {
-                (td_void)hit_replay_write_ppm(frame_path, job->frames[i],
-                    job->pose_valid[i] == TD_TRUE ? &job->poses[i] : TD_NULL, job->pose_valid[i]);
-            }
-        }
-        (void)snprintf_s(mp4_path, sizeof(mp4_path), sizeof(mp4_path) - 1, "%s/%s/hit_%d.mp4",
-            hit_replay_dir_base(), job->session, job->hit_idx);
-        (void)snprintf_s(cmd, sizeof(cmd), sizeof(cmd) - 1,
-            "command -v ffmpeg >/dev/null 2>&1 && ffmpeg -y -loglevel error -framerate %d "
-            "-i '%s/frame_%%04d.ppm' -c:v libx264 -pix_fmt yuv420p -crf 20 -preset fast -an '%s' 2>/dev/null",
-            fps, out_dir, mp4_path);
-        (td_void)system(cmd);
-    } else {
-        (void)snprintf_s(raw_dir, sizeof(raw_dir), sizeof(raw_dir) - 1, "%s/raw", out_dir);
-        (void)hit_replay_mkdir_p(raw_dir);
-        for (i = 0; i < job->frame_count; i++) {
-            if (job->frames[i] != TD_NULL) {
-                (td_void)hit_replay_write_raw_frame(raw_dir, i + 1, job->frames[i],
-                    job->pose_valid[i] == TD_TRUE ? &job->poses[i] : TD_NULL, job->pose_valid[i]);
-            }
-        }
-        printf("hit_replay: raw saved session=%s hit=%d frames=%u (pose deferred)\n",
-            job->session, job->hit_idx, job->frame_count);
-    }
-    (void)snprintf_s(meta_path, sizeof(meta_path), sizeof(meta_path) - 1, "%s/meta.txt", out_dir);
-    {
-        FILE *meta = fopen(meta_path, "w");
-        if (meta != TD_NULL) {
-            if (pose_eager == TD_TRUE) {
-                (void)fprintf(meta, "width=%u\nheight=%u\nfps=%d\ncount=%u\npose=1\nstage=done\n",
-                    (unsigned int)HIT_REPLAY_W, (unsigned int)HIT_REPLAY_H, fps, job->frame_count);
-            } else {
-                (void)fprintf(meta, "width=%u\nheight=%u\nfps=%d\ncount=%u\npose=0\nstage=raw\n",
-                    (unsigned int)HIT_REPLAY_W, (unsigned int)HIT_REPLAY_H, fps, job->frame_count);
-            }
-            fclose(meta);
-        }
-    }
-    (void)snprintf_s(done_path, sizeof(done_path), sizeof(done_path) - 1, "%s/done.flag", out_dir);
-    {
-        FILE *done = fopen(done_path, "w");
-        if (done != TD_NULL) {
-            (void)fprintf(done, "ok\n");
-            fclose(done);
-        }
-    }
-    if (pose_eager == TD_TRUE) {
-        printf("hit_replay: exported session=%s hit=%d frames=%u dir=%s\n",
-            job->session, job->hit_idx, job->frame_count, out_dir);
-    }
-    for (i = 0; i < job->frame_count; i++) {
-        free(job->frames[i]);
-        job->frames[i] = TD_NULL;
-    }
-    free(job);
-    return TD_NULL;
-}
-
-static td_void hit_replay_start_export(td_void)
-{
-    hit_replay_export_job_t *job = TD_NULL;
-    unsigned int i;
-    pthread_t tid;
-
-    if (g_hit_replay_export_count == 0) {
-        return;
-    }
-    job = (hit_replay_export_job_t *)calloc(1, sizeof(*job));
-    if (job == TD_NULL) {
-        return;
-    }
-    (void)strncpy_s(job->session, sizeof(job->session), g_hit_replay_session, sizeof(job->session) - 1);
-    job->hit_idx = g_hit_replay_hit_idx;
-    job->frame_count = 0;
-    for (i = 0; i < g_hit_replay_export_count; i++) {
-        if (g_hit_replay_export[i].nv12 == TD_NULL) {
-            continue;
-        }
-        job->frames[job->frame_count] = (unsigned char *)malloc(HIT_REPLAY_FRAME_BYTES);
-        if (job->frames[job->frame_count] == TD_NULL) {
-            break;
-        }
-        (void)memcpy_s(job->frames[job->frame_count], HIT_REPLAY_FRAME_BYTES,
-            g_hit_replay_export[i].nv12, HIT_REPLAY_FRAME_BYTES);
-        job->poses[job->frame_count] = g_hit_replay_export[i].pose;
-        job->pose_valid[job->frame_count] = g_hit_replay_export[i].pose_valid;
-        job->frame_count++;
-    }
-    g_hit_replay_export_count = 0;
-    if (pthread_create(&tid, TD_NULL, hit_replay_export_thread, job) != 0) {
-        for (i = 0; i < job->frame_count; i++) {
-            free(job->frames[i]);
-        }
-        free(job);
-        printf("hit_replay: export thread create failed\n");
-        return;
-    }
-    (void)pthread_detach(tid);
-}
-
-static td_bool hit_replay_pending_push_locked(const char *session, int hit_idx)
-{
-    unsigned int next_wr = (g_hit_replay_pending_wr + 1) % HIT_REPLAY_PENDING_MAX;
-
-    if (next_wr == g_hit_replay_pending_rd) {
-        printf("hit_replay: pending queue full, drop hit=%d\n", hit_idx);
-        return TD_FALSE;
-    }
-    (void)strncpy_s(g_hit_replay_pending[g_hit_replay_pending_wr].session,
-        sizeof(g_hit_replay_pending[g_hit_replay_pending_wr].session), session,
-        sizeof(g_hit_replay_pending[g_hit_replay_pending_wr].session) - 1);
-    g_hit_replay_pending[g_hit_replay_pending_wr].hit_idx = hit_idx;
-    g_hit_replay_pending_wr = next_wr;
-    return TD_TRUE;
-}
-
-static td_bool hit_replay_pending_pop_locked(char *session, size_t session_sz, int *hit_idx)
-{
-    if (g_hit_replay_pending_rd == g_hit_replay_pending_wr) {
-        return TD_FALSE;
-    }
-    (void)strncpy_s(session, session_sz, g_hit_replay_pending[g_hit_replay_pending_rd].session, session_sz - 1);
-    *hit_idx = g_hit_replay_pending[g_hit_replay_pending_rd].hit_idx;
-    g_hit_replay_pending_rd = (g_hit_replay_pending_rd + 1) % HIT_REPLAY_PENDING_MAX;
-    return TD_TRUE;
-}
-
-static td_void hit_replay_start_capture_locked(const char *session, int hit_idx)
-{
-    unsigned int i;
-    unsigned int start;
-    unsigned int count;
-    unsigned int dst;
-
-    (void)strncpy_s(g_hit_replay_session, sizeof(g_hit_replay_session), session, sizeof(g_hit_replay_session) - 1);
-    g_hit_replay_hit_idx = hit_idx;
-    g_hit_replay_export_count = 0;
-    count = 0;
-    if (g_replay_live_ring != 0) {
-        count = g_hit_replay_ring_count;
-        start = (count >= HIT_REPLAY_PRE_FRAMES)
-            ? g_hit_replay_ring_head
-            : ((HIT_REPLAY_PRE_FRAMES + g_hit_replay_ring_head - count) % HIT_REPLAY_PRE_FRAMES);
-        for (i = 0; (i < count) && (i < HIT_REPLAY_PRE_FRAMES); i++) {
-            unsigned int src_idx = (start + i) % HIT_REPLAY_PRE_FRAMES;
-
-            if (g_hit_replay_export_count >= HIT_REPLAY_TOTAL_FRAMES) {
-                break;
-            }
-            if (g_hit_replay_ring[src_idx].nv12 == TD_NULL) {
-                continue;
-            }
-            dst = g_hit_replay_export_count++;
-            if (hit_replay_export_slot(dst) != TD_NULL) {
-                hit_replay_copy_slot(&g_hit_replay_export[dst], &g_hit_replay_ring[src_idx]);
-            }
-        }
-    }
-    g_hit_replay_capturing_post = TD_TRUE;
-    g_hit_replay_post_left = HIT_REPLAY_POST_FRAMES;
-    printf("hit_replay: trigger session=%s hit=%d pre=%u post=%u live=%d pose_eager=%d\n",
-        session, hit_idx, count, (unsigned int)HIT_REPLAY_POST_FRAMES, g_replay_live_ring,
-        (hit_idx <= g_hit_replay_pose_eager_max) ? 1 : 0);
-}
-
-static td_void hit_replay_drain_pending_locked(td_void)
-{
-    char session[96];
-    int hit_idx = 0;
-
-    while ((g_hit_replay_capturing_post == TD_FALSE) &&
-        (hit_replay_pending_pop_locked(session, sizeof(session), &hit_idx) == TD_TRUE)) {
-        hit_replay_start_capture_locked(session, hit_idx);
-        break;
-    }
-}
-
-static td_void hit_replay_request_capture(const char *session, int hit_idx)
-{
-    if ((session == TD_NULL) || (session[0] == '\0') || (hit_idx <= 0)) {
-        return;
-    }
-    if (g_hit_replay_inited != TD_TRUE) {
-        hit_replay_init_once();
-    }
-    if (g_hit_replay_inited != TD_TRUE) {
-        return;
-    }
-
-    (void)pthread_mutex_lock(&g_hit_replay_mutex);
-    if (g_hit_replay_capturing_post == TD_TRUE) {
-        if (hit_replay_pending_push_locked(session, hit_idx) == TD_TRUE) {
-            printf("hit_replay: queued session=%s hit=%d (capturing)\n", session, hit_idx);
-        }
-    } else {
-        hit_replay_start_capture_locked(session, hit_idx);
-    }
-    (void)pthread_mutex_unlock(&g_hit_replay_mutex);
-}
-
-static td_void hit_replay_scale_to_out(const unsigned char *resize_src, td_u32 src_w, td_u32 src_h,
-    td_u32 src_stride_y, td_u32 src_stride_uv, td_bool src_is_nv21, unsigned char *dst)
-{
-    if ((src_w * HIT_REPLAY_H) == (src_h * HIT_REPLAY_W)) {
-        resize_yuv420sp_bilinear(resize_src, src_w, src_h, src_stride_y, src_stride_uv,
-            dst, HIT_REPLAY_W, HIT_REPLAY_H, src_is_nv21, TD_FALSE);
-    } else {
-        (td_void)resize_yuv420sp_letterbox(resize_src, src_w, src_h, src_stride_y, src_stride_uv,
-            dst, HIT_REPLAY_W, HIT_REPLAY_H, src_is_nv21, TD_FALSE);
-    }
-}
-
-static td_void hit_replay_push_scaled(const ot_video_frame_info *frame_info)
-{
-    const ot_video_frame *vf = &frame_info->video_frame;
-    td_u32 src_w = vf->width;
-    td_u32 src_h = vf->height;
-    td_u32 src_stride_y = vf->stride[0];
-    td_u32 src_stride_uv = vf->stride[1];
-    td_bool src_is_nv21 = hit_replay_src_is_nv21(vf->pixel_format);
-    const unsigned char *src_y = TD_NULL;
-    const unsigned char *src_uv = TD_NULL;
-    void *y_mapped = TD_NULL;
-    void *uv_mapped = TD_NULL;
-    unsigned char *slot = TD_NULL;
-    unsigned int ring_idx;
-
-    if ((g_hit_replay_inited != TD_TRUE) || (src_w == 0) || (src_h == 0)) {
-        return;
-    }
-
-    src_y = (const unsigned char *)vf->virt_addr[0];
-    if (src_y == TD_NULL) {
-        size_t y_sz = (size_t)src_stride_y * src_h;
-        size_t uv_sz = (size_t)src_stride_uv * (src_h / 2);
-        y_mapped = ss_mpi_sys_mmap(vf->phys_addr[0], y_sz);
-        uv_mapped = ss_mpi_sys_mmap(vf->phys_addr[1], uv_sz);
-        if ((y_mapped == TD_NULL) || (uv_mapped == TD_NULL)) {
-            if (y_mapped != TD_NULL) {
-                (td_void)ss_mpi_sys_munmap(y_mapped, y_sz);
-            }
-            if (uv_mapped != TD_NULL) {
-                (td_void)ss_mpi_sys_munmap(uv_mapped, uv_sz);
-            }
-            return;
-        }
-        src_y = (const unsigned char *)y_mapped;
-        src_uv = (const unsigned char *)uv_mapped;
-    } else {
-        src_uv = (const unsigned char *)vf->virt_addr[1];
-        if (src_uv == TD_NULL) {
-            src_uv = src_y + (size_t)src_stride_y * src_h;
-        }
-    }
-
-    (void)pthread_mutex_lock(&g_hit_replay_mutex);
-    if (g_replay_live_ring != 0) {
-        ring_idx = g_hit_replay_ring_head;
-        g_hit_replay_ring_head = (g_hit_replay_ring_head + 1) % HIT_REPLAY_PRE_FRAMES;
-        if (g_hit_replay_ring_count < HIT_REPLAY_PRE_FRAMES) {
-            g_hit_replay_ring_count++;
-        }
-        slot = hit_replay_ring_slot(ring_idx);
-        if ((slot != TD_NULL) && (src_y != TD_NULL) && (src_uv != TD_NULL)) {
-            const unsigned char *resize_src = src_y;
-            unsigned char *packed_src = TD_NULL;
-            if (src_uv != src_y + (size_t)src_stride_y * src_h) {
-                size_t y_sz = (size_t)src_stride_y * src_h;
-                size_t uv_sz = (size_t)src_stride_uv * (src_h / 2);
-                packed_src = (unsigned char *)malloc(y_sz + uv_sz);
-                if (packed_src != TD_NULL) {
-                    (void)memcpy_s(packed_src, y_sz + uv_sz, src_y, y_sz);
-                    (void)memcpy_s(packed_src + y_sz, uv_sz, src_uv, uv_sz);
-                    resize_src = packed_src;
-                }
-            }
-            hit_replay_scale_to_out(resize_src, src_w, src_h, src_stride_y, src_stride_uv, src_is_nv21, slot);
-            hit_replay_snapshot_pose(&g_hit_replay_ring[ring_idx]);
-            free(packed_src);
-        }
-
-        if ((g_hit_replay_capturing_post == TD_TRUE) &&
-            (g_hit_replay_export_count < HIT_REPLAY_TOTAL_FRAMES) && (slot != TD_NULL)) {
-            unsigned int exp_idx = g_hit_replay_export_count;
-
-            if (hit_replay_export_slot(exp_idx) != TD_NULL) {
-                hit_replay_copy_slot(&g_hit_replay_export[exp_idx], &g_hit_replay_ring[ring_idx]);
-                g_hit_replay_export_count++;
-            }
-        }
-    } else if ((g_hit_replay_capturing_post == TD_TRUE) &&
-        (g_hit_replay_export_count < HIT_REPLAY_TOTAL_FRAMES) &&
-        (src_y != TD_NULL) && (src_uv != TD_NULL)) {
-        unsigned int exp_idx = g_hit_replay_export_count;
-        unsigned char *exp = hit_replay_export_slot(exp_idx);
-        if (exp != TD_NULL) {
-            const unsigned char *resize_src = src_y;
-            unsigned char *packed_src = TD_NULL;
-            if (src_uv != src_y + (size_t)src_stride_y * src_h) {
-                size_t y_sz = (size_t)src_stride_y * src_h;
-                size_t uv_sz = (size_t)src_stride_uv * (src_h / 2);
-                packed_src = (unsigned char *)malloc(y_sz + uv_sz);
-                if (packed_src != TD_NULL) {
-                    (void)memcpy_s(packed_src, y_sz + uv_sz, src_y, y_sz);
-                    (void)memcpy_s(packed_src + y_sz, uv_sz, src_uv, uv_sz);
-                    resize_src = packed_src;
-                }
-            }
-            hit_replay_scale_to_out(resize_src, src_w, src_h, src_stride_y, src_stride_uv, src_is_nv21, exp);
-            hit_replay_snapshot_pose(&g_hit_replay_export[exp_idx]);
-            free(packed_src);
-            g_hit_replay_export_count++;
-        }
-    }
-
-    if ((g_hit_replay_capturing_post == TD_TRUE) && (g_hit_replay_post_left > 0)) {
-        g_hit_replay_post_left--;
-        if (g_hit_replay_post_left == 0) {
-            g_hit_replay_capturing_post = TD_FALSE;
-            hit_replay_start_export();
-            hit_replay_drain_pending_locked();
-        }
-    }
-    (void)pthread_mutex_unlock(&g_hit_replay_mutex);
-
-    if (y_mapped != TD_NULL) {
-        (td_void)ss_mpi_sys_munmap(y_mapped, (size_t)src_stride_y * src_h);
-    }
-    if (uv_mapped != TD_NULL) {
-        (td_void)ss_mpi_sys_munmap(uv_mapped, (size_t)src_stride_uv * (src_h / 2));
-    }
-}
-
-static td_void hit_replay_process_frame(const ot_video_frame_info *frame_info)
-{
-    struct timeval now;
-    double dt;
-    td_s32 fps = hit_replay_env_int("WIDGET_REPLAY_FPS", HIT_REPLAY_FPS, 8, 30);
-    double min_dt = 1.0 / (double)fps;
-
-    hit_replay_init_once();
-    if (g_hit_replay_inited != TD_TRUE) {
-        return;
-    }
-    if (gettimeofday(&now, TD_NULL) != 0) {
-        return;
-    }
-    if (g_hit_replay_last_push.tv_sec != 0) {
-        dt = (double)(now.tv_sec - g_hit_replay_last_push.tv_sec) +
-            (double)(now.tv_usec - g_hit_replay_last_push.tv_usec) / 1000000.0;
-        if (dt < min_dt) {
-            return;
-        }
-    }
-    g_hit_replay_last_push = now;
-    hit_replay_push_scaled(frame_info);
-}
-
-static td_bool hit_replay_copy_submit_locked(const ot_video_frame_info *frame_info)
-{
-    const ot_video_frame *vf = &frame_info->video_frame;
-    size_t y_sz;
-    size_t uv_sz;
-
-    if (frame_info == TD_NULL || vf->width == 0 || vf->height == 0) {
-        return TD_FALSE;
-    }
-    y_sz = (size_t)vf->stride[0] * vf->height;
-    uv_sz = (size_t)vf->stride[1] * (vf->height / 2U);
-    if ((y_sz + uv_sz) > HIT_REPLAY_SUBMIT_BYTES) {
-        return TD_FALSE;
-    }
-    if (g_replay_submit.nv12 == TD_NULL) {
-        g_replay_submit.nv12 = (unsigned char *)malloc(HIT_REPLAY_SUBMIT_BYTES);
-        if (g_replay_submit.nv12 == TD_NULL) {
-            return TD_FALSE;
-        }
-    }
-    if (vf->virt_addr[0] != TD_NULL) {
-        (td_void)memcpy_s(g_replay_submit.nv12, HIT_REPLAY_SUBMIT_BYTES, vf->virt_addr[0], y_sz);
-        if (vf->virt_addr[1] != TD_NULL) {
-            (td_void)memcpy_s(g_replay_submit.nv12 + y_sz, HIT_REPLAY_SUBMIT_BYTES - y_sz,
-                vf->virt_addr[1], uv_sz);
-        } else {
-            (td_void)memcpy_s(g_replay_submit.nv12 + y_sz, HIT_REPLAY_SUBMIT_BYTES - y_sz,
-                vf->virt_addr[0] + y_sz, uv_sz);
-        }
-    } else {
-        void *y_map = ss_mpi_sys_mmap(vf->phys_addr[0], y_sz);
-        void *uv_map = ss_mpi_sys_mmap(vf->phys_addr[1], uv_sz);
-        if (y_map == TD_NULL || uv_map == TD_NULL) {
-            if (y_map != TD_NULL) {
-                (td_void)ss_mpi_sys_munmap(y_map, y_sz);
-            }
-            if (uv_map != TD_NULL) {
-                (td_void)ss_mpi_sys_munmap(uv_map, uv_sz);
-            }
-            return TD_FALSE;
-        }
-        (td_void)memcpy_s(g_replay_submit.nv12, HIT_REPLAY_SUBMIT_BYTES, y_map, y_sz);
-        (td_void)memcpy_s(g_replay_submit.nv12 + y_sz, HIT_REPLAY_SUBMIT_BYTES - y_sz, uv_map, uv_sz);
-        (td_void)ss_mpi_sys_munmap(y_map, y_sz);
-        (td_void)ss_mpi_sys_munmap(uv_map, uv_sz);
-    }
-    g_replay_submit.width = vf->width;
-    g_replay_submit.height = vf->height;
-    g_replay_submit.stride_y = vf->stride[0];
-    g_replay_submit.stride_uv = vf->stride[1];
-    g_replay_submit.is_nv21 = pixel_format_is_nv21(vf->pixel_format);
-    g_replay_submit.pixel_format = vf->pixel_format;
-    g_replay_submit.pending = TD_TRUE;
-    return TD_TRUE;
-}
-
-static td_bool hit_replay_uses_dedicated_chn(td_void)
-{
-    hit_replay_init_once();
-    return (g_replay_src_chn >= 0) && ((ot_vpss_chn)g_replay_src_chn != g_attach_chn);
-}
-
-static td_void *hit_replay_worker_thread(td_void *arg)
-{
-    ot_video_frame_info frame_info;
-
-    (void)arg;
-    while (g_replay_worker_run != 0) {
-        if (hit_replay_needs_frames() != TD_TRUE) {
-            hit_replay_deinit();
-            usleep(100000);
-            continue;
-        }
-
-        if (hit_replay_uses_dedicated_chn() == TD_TRUE) {
-            ot_video_frame_info replay_frame;
-            td_s32 get_ret;
-
-            (td_void)memset_s(&replay_frame, sizeof(replay_frame), 0, sizeof(replay_frame));
-            get_ret = ss_mpi_vpss_get_chn_frame(g_attach_grp, (ot_vpss_chn)g_replay_src_chn,
-                &replay_frame, 0);
-            if (get_ret != TD_SUCCESS) {
-                usleep(30000);
-                continue;
-            }
-            hit_replay_process_frame(&replay_frame);
-            (td_void)ss_mpi_vpss_release_chn_frame(g_attach_grp, (ot_vpss_chn)g_replay_src_chn,
-                &replay_frame);
-            continue;
-        }
-
-        (td_void)pthread_mutex_lock(&g_replay_worker_mtx);
-        while ((g_replay_worker_run != 0) && (g_replay_submit.pending != TD_TRUE)) {
-            (td_void)pthread_cond_wait(&g_replay_worker_cv, &g_replay_worker_mtx);
-        }
-        if (g_replay_worker_run == 0) {
-            (td_void)pthread_mutex_unlock(&g_replay_worker_mtx);
-            break;
-        }
-        (td_void)memset_s(&frame_info, sizeof(frame_info), 0, sizeof(frame_info));
-        frame_info.video_frame.width = g_replay_submit.width;
-        frame_info.video_frame.height = g_replay_submit.height;
-        frame_info.video_frame.stride[0] = g_replay_submit.stride_y;
-        frame_info.video_frame.stride[1] = g_replay_submit.stride_uv;
-        frame_info.video_frame.pixel_format = g_replay_submit.pixel_format;
-        frame_info.video_frame.virt_addr[0] = g_replay_submit.nv12;
-        frame_info.video_frame.virt_addr[1] = g_replay_submit.nv12 +
-            (size_t)g_replay_submit.stride_y * g_replay_submit.height;
-        g_replay_submit.pending = TD_FALSE;
-        (td_void)pthread_mutex_unlock(&g_replay_worker_mtx);
-
-        if (hit_replay_needs_frames() != TD_TRUE) {
-            hit_replay_deinit();
-            continue;
-        }
-        hit_replay_process_frame(&frame_info);
-    }
-    return TD_NULL;
-}
-
-static td_void hit_replay_worker_start(td_void)
-{
-    if (g_replay_worker_on == TD_TRUE) {
-        return;
-    }
-    g_replay_worker_run = 1;
-    if (pthread_create(&g_replay_worker_tid, TD_NULL, hit_replay_worker_thread, TD_NULL) != 0) {
-        g_replay_worker_run = 0;
-        printf("hit_replay: worker thread create failed\n");
-        return;
-    }
-    g_replay_worker_on = TD_TRUE;
-    printf("hit_replay: async worker started\n");
-}
-
-static td_void hit_replay_worker_stop(td_void)
-{
-    if (g_replay_worker_on != TD_TRUE) {
-        return;
-    }
-    g_replay_worker_run = 0;
-    (td_void)pthread_cond_broadcast(&g_replay_worker_cv);
-    (td_void)pthread_join(g_replay_worker_tid, TD_NULL);
-    g_replay_worker_on = TD_FALSE;
-    if (g_replay_submit.nv12 != TD_NULL) {
-        free(g_replay_submit.nv12);
-        g_replay_submit.nv12 = TD_NULL;
-    }
-    g_replay_submit.pending = TD_FALSE;
-}
-
-static td_void hit_replay_submit_frame(const ot_video_frame_info *frame_info)
-{
-    if (hit_replay_needs_frames() != TD_TRUE) {
-        return;
-    }
-    hit_replay_init_once();
-
-    /* VPSS ch3 等专用回放通道：worker 按 WIDGET_REPLAY_FPS 取帧，勿用 attach 方图 */
-    if (hit_replay_uses_dedicated_chn() == TD_TRUE) {
-        hit_replay_worker_start();
-        return;
-    }
-
-    if (g_replay_live_ring != 0) {
-        hit_replay_worker_start();
-        if (g_replay_worker_on != TD_TRUE) {
-            return;
-        }
-        (td_void)pthread_mutex_lock(&g_replay_worker_mtx);
-        if (g_replay_submit.pending == TD_TRUE) {
-            (td_void)pthread_mutex_unlock(&g_replay_worker_mtx);
-            return;
-        }
-        if (hit_replay_copy_submit_locked(frame_info) == TD_TRUE) {
-            (td_void)pthread_cond_signal(&g_replay_worker_cv);
-        }
-        (td_void)pthread_mutex_unlock(&g_replay_worker_mtx);
-        return;
-    }
-    if (g_hit_replay_capturing_post == TD_TRUE) {
-        hit_replay_process_frame(frame_info);
-    }
-}
-
-static td_void hit_replay_feed_frame(const ot_video_frame_info *frame_info)
-{
-    hit_replay_submit_frame(frame_info);
-}
-
-static td_void hit_replay_request_pose_render(const char *session, int hit_idx)
-{
-    hit_replay_pose_job_t *job = TD_NULL;
-    pthread_t tid;
-
-    if ((session == TD_NULL) || (session[0] == '\0') || (hit_idx <= 0)) {
-        return;
-    }
-    job = (hit_replay_pose_job_t *)calloc(1, sizeof(*job));
-    if (job == TD_NULL) {
-        return;
-    }
-    (void)strncpy_s(job->session, sizeof(job->session), session, sizeof(job->session) - 1);
-    job->hit_idx = hit_idx;
-    if (pthread_create(&tid, TD_NULL, hit_replay_pose_render_thread, job) != 0) {
-        free(job);
-        printf("hit_replay: pose render thread create failed session=%s hit=%d\n", session, hit_idx);
-        return;
-    }
-    (void)pthread_detach(tid);
-}
-
-static td_void hit_replay_poll_pose_trigger(td_void)
-{
-    FILE *fp = TD_NULL;
-    char line[160];
-    char session[96];
-    int hit_idx = 0;
-    td_bool got_any = TD_FALSE;
-
-    fp = fopen(HIT_REPLAY_POSE_REQ_PATH, "r");
-    if (fp == TD_NULL) {
-        return;
-    }
-    while (fgets(line, (int)sizeof(line), fp) != TD_NULL) {
-        if (sscanf(line, "%95s %d", session, &hit_idx) != 2) {
-            continue;
-        }
-        hit_replay_request_pose_render(session, hit_idx);
-        got_any = TD_TRUE;
-    }
-    fclose(fp);
-    if (got_any == TD_TRUE) {
-        (void)remove(HIT_REPLAY_POSE_REQ_PATH);
-    }
-}
-
-static td_void hit_replay_poll_trigger(td_void)
-{
-    FILE *fp = TD_NULL;
-    char line[160];
-    char session[96];
-    int hit_idx = 0;
-    td_bool got_any = TD_FALSE;
-
-    fp = fopen(HIT_REPLAY_REQ_PATH, "r");
-    if (fp == TD_NULL) {
-        return;
-    }
-    while (fgets(line, (int)sizeof(line), fp) != TD_NULL) {
-        if (sscanf(line, "%95s %d", session, &hit_idx) != 2) {
-            continue;
-        }
-        hit_replay_request_capture(session, hit_idx);
-        got_any = TD_TRUE;
-    }
-    fclose(fp);
-    if (got_any == TD_TRUE) {
-        (void)remove(HIT_REPLAY_REQ_PATH);
-    }
-}
 
 static td_void vio_ai_loop(ot_vpss_grp grp, ot_vpss_chn chn)
 {

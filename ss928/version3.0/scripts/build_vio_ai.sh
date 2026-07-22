@@ -1,12 +1,12 @@
 #!/bin/bash
-# 交叉编译 version3.0 sample_vio_ai（增量：仅重编 sample_vio_ai.o，不 make clean）
+# 交叉编译 version3.0 sample_vio_ai（增量：重编 vio_ai 模块 .o，不 make clean）
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 V3_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SDK_ROOT="$(cd "$V3_ROOT/.." && pwd)"
 VIO_AI_DIR="$SDK_ROOT/smp/a55_linux/mpp/sample/vio_ai"
-SRC="$V3_ROOT/ai/sample_vio_ai.c"
+AI_SRC_DIR="$V3_ROOT/ai"
 OUT_BIN="$V3_ROOT/bin/sample_vio_ai"
 FORCE="${VIO_AI_FORCE_REBUILD:-0}"
 
@@ -16,15 +16,17 @@ if ! command -v aarch64-mix210-linux-gcc >/dev/null 2>&1; then
   echo "错误: 未找到 aarch64-mix210-linux-gcc"
   exit 1
 fi
-if [[ ! -f "$SRC" ]]; then
-  echo "错误: 未找到 $SRC"
+if [[ ! -f "$AI_SRC_DIR/sample_vio_ai.c" ]]; then
+  echo "错误: 未找到 $AI_SRC_DIR/sample_vio_ai.c"
   exit 1
 fi
 
 mkdir -p "$V3_ROOT/bin" "$VIO_AI_DIR"
-cp -f "$SRC" "$VIO_AI_DIR/sample_vio_ai.c"
+cp -f "$AI_SRC_DIR"/sample_vio_ai.c "$VIO_AI_DIR/"
+cp -f "$AI_SRC_DIR"/vio_ai_*.c "$VIO_AI_DIR/"
+cp -f "$AI_SRC_DIR"/vio_ai_internal.h "$VIO_AI_DIR/"
 
-echo "=== 编译 sample_vio_ai (增量) ==="
+echo "=== 编译 sample_vio_ai (增量, 多模块) ==="
 cd "$VIO_AI_DIR"
 
 if [[ "$FORCE" == "1" ]]; then
@@ -38,7 +40,7 @@ else
       sample_comm_mipi_tx.o sample_comm_vpss.o loadbmp.o sample_comm_vdec.o \
       sample_comm_audio.o sample_comm_venc.o sample_comm_region.o 2>/dev/null || make -j"$(nproc)"
   fi
-  rm -f sample_vio_ai.o
+  rm -f sample_vio_ai.o vio_ai_env.o vio_ai_yuv.o vio_ai_pose.o vio_ai_hit_replay.o
   make -j"$(nproc)" sample_vio_ai
 fi
 

@@ -25,6 +25,8 @@ ExecStartPre=-/bin/sh -c 'killall weston MiniBrowser vo_gfbg_init widget_panel s
 # 轮询 fb0（250ms 间隔，最多 10s），比固定 sleep 10 更快
 ExecStartPre=/bin/sh -c 'for i in $(seq 1 40); do test -c /dev/fb0 && exit 0; sleep 0.25; done; exit 0'
 ExecStart=/bin/bash /opt/widget_ui/run.sh
+# 正常停止时清掉击球回放（断电重启则由 run.sh 启动时再清一次）
+ExecStopPost=-/bin/sh -c 'test "${WIDGET_REPLAY_KEEP:-0}" = "1" || rm -rf "${WIDGET_REPLAY_DIR:-/opt/widget_ui/replays}"/*'
 StandardOutput=append:/tmp/widget_ui_boot.log
 StandardError=append:/tmp/widget_ui_boot.log
 Restart=on-failure
